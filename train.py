@@ -33,6 +33,8 @@ def parse_args():
     parser.add_argument("--weak-positive-margin", type=int, default=None)
     parser.add_argument("--tokenizer-max-length", type=int, default=None)
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--best-metric", type=str, default=None)
+    parser.add_argument("--best-metric-mode", type=str, default=None)
     parser.add_argument("--max-train-samples", type=int, default=None)
     parser.add_argument("--max-val-samples", type=int, default=None)
     parser.add_argument("--freeze-text-encoder", action=argparse.BooleanOptionalAction, default=None)
@@ -67,6 +69,8 @@ def build_config(args) -> TrainConfig:
         "weak_positive_margin",
         "tokenizer_max_length",
         "seed",
+        "best_metric",
+        "best_metric_mode",
         "max_train_samples",
         "max_val_samples",
         "freeze_text_encoder",

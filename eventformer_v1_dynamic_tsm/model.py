@@ -8,11 +8,7 @@ from typing import List, Tuple, Dict, Any, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-try:
-    from transformers import AutoModel
-except Exception:
-    AutoModel = None
+from transformers import AutoModel
 
 
 class AnchorMultiHeadSelfAttention(nn.Module):
@@ -461,6 +457,7 @@ class EventFormerV1DynamicTSM(nn.Module):
         pos: torch.Tensor,
         hard_neg: torch.Tensor,
         logit_scale: torch.Tensor,
+        hard_neg_valid_mask: Optional[torch.Tensor] = None,
     ):
         qn = F.normalize(q, dim=-1)
         pn = F.normalize(pos, dim=-1)
@@ -469,6 +466,8 @@ class EventFormerV1DynamicTSM(nn.Module):
         scale = logit_scale.exp().clamp(max=100.0)
         inbatch_logits = qn @ pn.t()
         hard_logits = (qn * hn).sum(dim=-1, keepdim=True)
+        if hard_neg_valid_mask is not None:
+            hard_logits = hard_logits.masked_fill(~hard_neg_valid_mask.view(-1, 1), -1e4)
         logits = scale * torch.cat([inbatch_logits, hard_logits], dim=1)
         labels = torch.arange(q.shape[0], device=q.device)
         loss_q2v = F.cross_entropy(logits, labels)
@@ -533,54 +532,90 @@ class EventFormerV1DynamicTSM(nn.Module):
         q: torch.Tensor,
         h: torch.Tensor,
         feature_mask: torch.Tensor,
+        video_ids=None,
     ):
         B, N, _ = h.shape
         if B < 2:
-            return h[:, 0], [None] * B
+            return h[:, 0], [None] * B, torch.zeros(B, dtype=torch.bool, device=h.device)
         qn = F.normalize(q.detach(), dim=-1)
         hn = F.normalize(h.detach(), dim=-1)
 
         hard_neg_frames = []
         hard_neg_indices = []
+        valid_list = []
 
         for i in range(B):
             sim = torch.einsum("d,bnd->bn", qn[i], hn)
             sim = sim.masked_fill(~feature_mask.bool(), float("-inf"))
-            sim[i, :] = float("-inf")
+            if video_ids is not None:
+                same_video_mask = torch.zeros(B, dtype=torch.bool, device=h.device)
+                for j in range(B):
+                    if video_ids[j] == video_ids[i]:
+                        same_video_mask[j] = True
+                sim = sim.masked_fill(same_video_mask.view(B, 1), float("-inf"))
+            else:
+                sim[i, :] = float("-inf")
+
+            if not torch.isfinite(sim).any():
+                hard_neg_frames.append(h[i, 0])
+                hard_neg_indices.append(None)
+                valid_list.append(False)
+                continue
+
             flat_idx = torch.argmax(sim.reshape(-1))
             neg_b = int(flat_idx // N)
             neg_t = int(flat_idx % N)
             hard_neg_frames.append(h[neg_b, neg_t])
             hard_neg_indices.append((neg_b, neg_t))
+            valid_list.append(True)
 
-        return torch.stack(hard_neg_frames), hard_neg_indices
+        hard_neg_valid_mask = torch.tensor(valid_list, dtype=torch.bool, device=h.device)
+        return torch.stack(hard_neg_frames), hard_neg_indices, hard_neg_valid_mask
 
     def _mine_hard_negative_events(
         self,
         q: torch.Tensor,
         g: torch.Tensor,
         event_mask: torch.Tensor,
+        video_ids=None,
     ):
         B, M, _ = g.shape
         if B < 2:
-            return g[:, 0], [None] * B
+            return g[:, 0], [None] * B, torch.zeros(B, dtype=torch.bool, device=g.device)
         qn = F.normalize(q.detach(), dim=-1)
         gn = F.normalize(g.detach(), dim=-1)
 
         hard_neg_events = []
         hard_neg_indices = []
+        valid_list = []
 
         for i in range(B):
             sim = torch.einsum("d,bmd->bm", qn[i], gn)
             sim = sim.masked_fill(~event_mask.bool(), float("-inf"))
-            sim[i, :] = float("-inf")
+            if video_ids is not None:
+                same_video_mask = torch.zeros(B, dtype=torch.bool, device=g.device)
+                for j in range(B):
+                    if video_ids[j] == video_ids[i]:
+                        same_video_mask[j] = True
+                sim = sim.masked_fill(same_video_mask.view(B, 1), float("-inf"))
+            else:
+                sim[i, :] = float("-inf")
+
+            if not torch.isfinite(sim).any():
+                hard_neg_events.append(g[i, 0])
+                hard_neg_indices.append(None)
+                valid_list.append(False)
+                continue
+
             flat_idx = torch.argmax(sim.reshape(-1))
             neg_b = int(flat_idx // M)
             neg_m = int(flat_idx % M)
             hard_neg_events.append(g[neg_b, neg_m])
             hard_neg_indices.append((neg_b, neg_m))
+            valid_list.append(True)
 
-        return torch.stack(hard_neg_events), hard_neg_indices
+        hard_neg_valid_mask = torch.tensor(valid_list, dtype=torch.bool, device=g.device)
+        return torch.stack(hard_neg_events), hard_neg_indices, hard_neg_valid_mask
 
     def _select_weak_positives(
         self,
@@ -649,7 +684,16 @@ class EventFormerV1DynamicTSM(nn.Module):
             weak_valid_mask,
         )
 
-    def forward(self, features: torch.Tensor, feature_mask: torch.Tensor, input_ids: torch.Tensor, attention_mask: torch.Tensor, gt_start_idx: torch.Tensor, gt_end_idx: torch.Tensor):
+    def forward(
+        self,
+        features: torch.Tensor,
+        feature_mask: torch.Tensor,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        gt_start_idx: torch.Tensor,
+        gt_end_idx: torch.Tensor,
+        video_ids=None,
+    ):
         if self.use_modality_specific_query:
             q_dict = self.encode_text_multi(input_ids, attention_mask)
             q = q_dict["visual"]
@@ -666,15 +710,29 @@ class EventFormerV1DynamicTSM(nn.Module):
         scores_event_hard = None
         hard_neg_frame_indices = [None] * q.shape[0]
         hard_neg_event_indices = [None] * q.shape[0]
+        hard_neg_frame_valid_mask = torch.zeros(q.shape[0], dtype=torch.bool, device=q.device)
+        hard_neg_event_valid_mask = torch.zeros(q.shape[0], dtype=torch.bool, device=q.device)
 
         if self.use_hard_negative and q.shape[0] >= 2:
-            hard_neg_frames, hard_neg_frame_indices = self._mine_hard_negative_frames(q=q, h=h, feature_mask=feature_mask)
-            hard_neg_events, hard_neg_event_indices = self._mine_hard_negative_events(q=q, g=g, event_mask=event_mask)
+            hard_neg_frames, hard_neg_frame_indices, hard_neg_frame_valid_mask = self._mine_hard_negative_frames(
+                q=q, h=h, feature_mask=feature_mask, video_ids=video_ids
+            )
+            hard_neg_events, hard_neg_event_indices, hard_neg_event_valid_mask = self._mine_hard_negative_events(
+                q=q, g=g, event_mask=event_mask, video_ids=video_ids
+            )
             loss_frame_hard, scores_frame_hard = self._contrastive_loss_inbatch_plus_hard(
-                q=q, pos=pos_frames, hard_neg=hard_neg_frames, logit_scale=self.logit_scale_frame
+                q=q,
+                pos=pos_frames,
+                hard_neg=hard_neg_frames,
+                logit_scale=self.logit_scale_frame,
+                hard_neg_valid_mask=hard_neg_frame_valid_mask,
             )
             loss_event_hard, scores_event_hard = self._contrastive_loss_inbatch_plus_hard(
-                q=q, pos=pos_events, hard_neg=hard_neg_events, logit_scale=self.logit_scale_event
+                q=q,
+                pos=pos_events,
+                hard_neg=hard_neg_events,
+                logit_scale=self.logit_scale_event,
+                hard_neg_valid_mask=hard_neg_event_valid_mask,
             )
 
         loss_frame = loss_frame_base + self.lambda_hard * loss_frame_hard
@@ -722,6 +780,8 @@ class EventFormerV1DynamicTSM(nn.Module):
             "pos_event_indices": pos_event_indices,
             "hard_neg_frame_indices": hard_neg_frame_indices,
             "hard_neg_event_indices": hard_neg_event_indices,
+            "hard_neg_frame_valid_mask": hard_neg_frame_valid_mask.detach(),
+            "hard_neg_event_valid_mask": hard_neg_event_valid_mask.detach(),
             "weak_frame_indices": weak_frame_indices,
             "weak_event_indices": weak_event_indices,
             "weak_valid_mask": weak_valid_mask.detach(),

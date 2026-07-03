@@ -4,11 +4,9 @@ import json
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+import torch
 
-try:
-    import torch
-except Exception:
-    torch = None
+
 
 
 def _filter_dataclass_kwargs(cls, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -66,6 +64,8 @@ class TrainConfig:
     tokenizer_max_length: int = 64
     seed: int = 42
     save_best_only: bool = False
+    best_metric: str = "event_r1_iou_0_5"
+    best_metric_mode: str = "max"
 
     @classmethod
     def from_json(cls, path: str) -> "TrainConfig":

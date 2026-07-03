@@ -54,5 +54,7 @@
   "max_val_samples": null,
   "tokenizer_max_length": 64,
   "seed": 42,
-  "save_best_only": false
+  "save_best_only": false,
+  "best_metric": "event_r1_iou_0_5",
+  "best_metric_mode": "max"
 }
