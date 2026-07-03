@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local training outputs
+checkpoints/
+runs/
+logs/
+wandb/
+
+# Generated manifests and artifacts
+manifests/*.jsonl
+manifests/manifest_build_config.json
+*.pt
+*.pth
+*.ckpt
+*.npz
+*.npy
+*.zip
+
+# Large local data
+videos/
+features/
+visual_features/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
