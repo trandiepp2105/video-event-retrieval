@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 
-from video_event_retrieval.eventformer_v1_dynamic_tsm.config import TrainConfig
+from eventformer_v1_dynamic_tsm.config import TrainConfig
 
 
 def parse_args():
@@ -10,7 +10,7 @@ def parse_args():
     parser.add_argument(
         "--config",
         type=str,
-        default="video_event_retrieval/configs/train_config.json",
+        default="configs/train_config.json",
         help="Path to JSON config file.",
     )
     parser.add_argument("--train-manifest", type=str, default=None)
@@ -89,7 +89,7 @@ def build_config(args) -> TrainConfig:
 def main():
     args = parse_args()
     cfg = build_config(args)
-    from video_event_retrieval.eventformer_v1_dynamic_tsm.trainer import EventFormerTrainer
+    from eventformer_v1_dynamic_tsm.trainer import EventFormerTrainer
 
     trainer = EventFormerTrainer(cfg)
     log_rows = trainer.run()
