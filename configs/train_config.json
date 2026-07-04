@@ -1,8 +1,11 @@
 {
+  "train_stage": "retriever",
   "train_manifest": "/kaggle/input/datasets/trandiep2105/activitynet-manifests/manifests/train_v1.jsonl",
   "val_manifest": "/kaggle/input/datasets/trandiep2105/activitynet-manifests/manifests/val_v1.jsonl",
   "feature_dir": "/kaggle/input/datasets/trandiep2105/activitynet-visual-features/visual_features",
   "output_dir": "/kaggle/working/checkpoints_mean_hard03_weak005",
+  "retriever_checkpoint": null,
+  "shared_norm_negatives": null,
 
   "text_model_name": "roberta-base",
   "freeze_text_encoder": true,
@@ -42,6 +45,14 @@
   "weak_positive_margin": 10,
 
   "temperature": 0.07,
+  "use_moment_localizer": false,
+  "use_cross_attention": false,
+  "use_event_auxiliary_loss": false,
+  "lambda_event_localizer": 0.8,
+  "max_localizer_span_len": 64,
+  "use_shared_norm": false,
+  "shared_norm_num_negatives": 5,
+  "segment_duration_sec": 1.5,
 
   "batch_size": 128,
   "num_workers": 2,

@@ -227,7 +227,8 @@ class EventFormerV1DynamicTSM(nn.Module):
         )
 
         self.text_encoder = AutoModel.from_pretrained(text_model_name)
-        text_dim = self.text_encoder.config.hidden_size
+        self.text_hidden_size = int(self.text_encoder.config.hidden_size)
+        text_dim = self.text_hidden_size
         self.query_projection = nn.Linear(text_dim, d_model)
         self.query_attn_pool = nn.Sequential(
             nn.Linear(text_dim, text_dim),

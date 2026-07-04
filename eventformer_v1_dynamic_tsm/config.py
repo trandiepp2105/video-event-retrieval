@@ -16,10 +16,13 @@ def _filter_dataclass_kwargs(cls, data: Dict[str, Any]) -> Dict[str, Any]:
 
 @dataclass
 class TrainConfig:
+    train_stage: str = "retriever"
     train_manifest: str = "manifests/train_v1.jsonl"
     val_manifest: str = "manifests/val_v1.jsonl"
     feature_dir: str = "visual_features"
     output_dir: str = "checkpoints"
+    retriever_checkpoint: Optional[str] = None
+    shared_norm_negatives: Optional[str] = None
 
     text_model_name: str = "roberta-base"
     freeze_text_encoder: bool = True
@@ -53,6 +56,14 @@ class TrainConfig:
     lambda_weak_event: Optional[float] = None
     weak_positive_margin: int = 10
     temperature: float = 0.07
+    use_moment_localizer: bool = False
+    use_cross_attention: bool = False
+    use_event_auxiliary_loss: bool = False
+    lambda_event_localizer: float = 0.8
+    max_localizer_span_len: int = 64
+    use_shared_norm: bool = False
+    shared_norm_num_negatives: int = 5
+    segment_duration_sec: float = 1.5
 
     batch_size: int = 4
     num_workers: int = 2

@@ -17,6 +17,9 @@ def parse_args():
     parser.add_argument("--val-manifest", type=str, default=None)
     parser.add_argument("--feature-dir", type=str, default=None)
     parser.add_argument("--output-dir", type=str, default=None)
+    parser.add_argument("--train-stage", type=str, choices=["retriever", "localizer"], default=None)
+    parser.add_argument("--retriever-checkpoint", type=str, default=None)
+    parser.add_argument("--shared-norm-negatives", type=str, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=None)
@@ -29,6 +32,9 @@ def parse_args():
     parser.add_argument("--event-strategy", type=str, default=None)
     parser.add_argument("--event-kmeans-num-events", type=int, default=None)
     parser.add_argument("--event-window-size", type=int, default=None)
+    parser.add_argument("--lambda-event-localizer", type=float, default=None)
+    parser.add_argument("--max-localizer-span-len", type=int, default=None)
+    parser.add_argument("--shared-norm-num-negatives", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--weight-decay", type=float, default=None)
     parser.add_argument("--max-grad-norm", type=float, default=None)
@@ -47,6 +53,10 @@ def parse_args():
     parser.add_argument("--use-modality-specific-query", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--use-hard-negative", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--use-weak-positive", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--use-moment-localizer", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--use-cross-attention", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--use-event-auxiliary-loss", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--use-shared-norm", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--save-best-only", action=argparse.BooleanOptionalAction, default=None)
     return parser.parse_args()
@@ -59,6 +69,9 @@ def build_config(args) -> TrainConfig:
         "val_manifest",
         "feature_dir",
         "output_dir",
+        "train_stage",
+        "retriever_checkpoint",
+        "shared_norm_negatives",
         "batch_size",
         "epochs",
         "num_workers",
@@ -71,6 +84,9 @@ def build_config(args) -> TrainConfig:
         "event_strategy",
         "event_kmeans_num_events",
         "event_window_size",
+        "lambda_event_localizer",
+        "max_localizer_span_len",
+        "shared_norm_num_negatives",
         "lr",
         "weight_decay",
         "max_grad_norm",
@@ -89,6 +105,10 @@ def build_config(args) -> TrainConfig:
         "use_modality_specific_query",
         "use_hard_negative",
         "use_weak_positive",
+        "use_moment_localizer",
+        "use_cross_attention",
+        "use_event_auxiliary_loss",
+        "use_shared_norm",
         "amp",
         "save_best_only",
     ]:
@@ -101,10 +121,16 @@ def build_config(args) -> TrainConfig:
 def main():
     args = parse_args()
     cfg = build_config(args)
-    from eventformer_v1_dynamic_tsm.trainer import EventFormerTrainer
+    if cfg.train_stage == "localizer" or cfg.use_moment_localizer:
+        from eventformer_v1_dynamic_tsm.trainer_localizer import EventFormerLocalizerTrainer
 
-    trainer = EventFormerTrainer(cfg)
-    log_rows = trainer.run()
+        trainer = EventFormerLocalizerTrainer(cfg)
+        log_rows = trainer.fit()
+    else:
+        from eventformer_v1_dynamic_tsm.trainer import EventFormerTrainer
+
+        trainer = EventFormerTrainer(cfg)
+        log_rows = trainer.run()
     if log_rows:
         print("Last epoch:", log_rows[-1])
 
