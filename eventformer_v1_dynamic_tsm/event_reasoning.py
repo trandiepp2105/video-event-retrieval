@@ -1,0 +1,275 @@
+from __future__ import annotations
+
+from typing import List, Tuple
+
+import torch
+import torch.nn.functional as F
+
+
+class EventReasoner:
+    def __init__(
+        self,
+        strategy: str = "tsm",
+        tsm_window_size: int = 4,
+        tsm_threshold_alpha: float = 0.5,
+        min_event_len: int = 3,
+        max_event_len: int = 30,
+        kmeans_num_events: int = 10,
+        window_size: int = 5,
+    ):
+        self.strategy = strategy
+        self.tsm_window_size = tsm_window_size
+        self.tsm_threshold_alpha = tsm_threshold_alpha
+        self.min_event_len = min_event_len
+        self.max_event_len = max_event_len
+        self.kmeans_num_events = kmeans_num_events
+        self.window_size = window_size
+
+    @staticmethod
+    def _mean_square_block(tsm: torch.Tensor, start: int, end: int, exclude_diag: bool = True):
+        block = tsm[start:end, start:end]
+        if block.numel() == 0:
+            return torch.tensor(0.0, device=tsm.device)
+        if exclude_diag and block.shape[0] > 1:
+            total = block.sum() - torch.diagonal(block).sum()
+            denom = block.numel() - block.shape[0]
+            return total / max(denom, 1)
+        return block.mean()
+
+    def _boundaries_to_spans(self, boundaries: List[int], n: int):
+        boundaries = sorted({int(b) for b in boundaries if 0 < int(b) < n})
+        starts = [0] + boundaries
+        ends = boundaries + [n]
+        spans = []
+        for s, e in zip(starts, ends):
+            if e <= s:
+                continue
+            spans.append((int(s), int(e - 1)))
+        return spans
+
+    def _split_too_long_spans(self, spans: List[Tuple[int, int]]):
+        max_len = max(1, int(self.max_event_len))
+        out = []
+        for s, e in spans:
+            cur = int(s)
+            while cur <= e:
+                end = min(e, cur + max_len - 1)
+                out.append((cur, end))
+                cur = end + 1
+        return out
+
+    def _merge_too_short_spans(self, spans: List[Tuple[int, int]], n: int):
+        if not spans:
+            return [(0, n - 1)] if n > 0 else []
+
+        min_len = max(1, int(self.min_event_len))
+        merged = [list(spans[0])]
+        for s, e in spans[1:]:
+            cur_len = merged[-1][1] - merged[-1][0] + 1
+            new_len = e - s + 1
+            if cur_len < min_len:
+                merged[-1][1] = e
+            elif new_len < min_len:
+                merged[-1][1] = e
+            else:
+                merged.append([s, e])
+
+        if len(merged) > 1:
+            last_len = merged[-1][1] - merged[-1][0] + 1
+            if last_len < min_len:
+                merged[-2][1] = merged[-1][1]
+                merged.pop()
+
+        return [(int(s), int(e)) for s, e in merged]
+
+    def _sanitize_spans(self, spans: List[Tuple[int, int]], n: int):
+        if n <= 0:
+            return []
+        clean = []
+        for s, e in spans:
+            s = max(0, min(int(s), n - 1))
+            e = max(s, min(int(e), n - 1))
+            clean.append((s, e))
+        clean.sort()
+        if not clean:
+            return [(0, n - 1)]
+
+        merged = [list(clean[0])]
+        for s, e in clean[1:]:
+            if s <= merged[-1][1] + 1:
+                merged[-1][1] = max(merged[-1][1], e)
+            else:
+                merged.append([s, e])
+        return [(int(s), int(e)) for s, e in merged]
+
+    def _finalize_spans(self, spans: List[Tuple[int, int]], n: int):
+        spans = self._sanitize_spans(spans, n)
+        spans = self._merge_too_short_spans(spans, n)
+        spans = self._split_too_long_spans(spans)
+        spans = self._sanitize_spans(spans, n)
+        return spans if spans else [(0, n - 1)]
+
+    def detect_window_spans(self, h_valid: torch.Tensor):
+        n = int(h_valid.shape[0])
+        if n <= 0:
+            return []
+        w = max(1, int(self.window_size))
+        spans = []
+        start = 0
+        while start < n:
+            end = min(n - 1, start + w - 1)
+            spans.append((start, end))
+            start = end + 1
+        return spans if spans else [(0, n - 1)]
+
+    def detect_tsm_spans(self, h_valid: torch.Tensor) -> List[Tuple[int, int]]:
+        with torch.no_grad():
+            n = int(h_valid.shape[0])
+            if n <= 0:
+                return []
+            if n <= self.min_event_len * 2:
+                return [(0, n - 1)]
+
+            z = F.normalize(h_valid.detach().float(), dim=-1)
+            tsm = z @ z.t()
+            w = int(self.tsm_window_size)
+            candidate_ts = []
+            candidate_scores = []
+
+            for t in range(self.min_event_len, n - self.min_event_len + 1):
+                l0, l1 = max(0, t - w), t
+                r0, r1 = t, min(n, t + w)
+                if l1 <= l0 or r1 <= r0:
+                    continue
+                ll = self._mean_square_block(tsm, l0, l1, exclude_diag=True)
+                rr = self._mean_square_block(tsm, r0, r1, exclude_diag=True)
+                lr = tsm[l0:l1, r0:r1].mean()
+                rl = tsm[r0:r1, l0:l1].mean()
+                score = ll + rr - lr - rl
+                candidate_ts.append(t)
+                candidate_scores.append(score)
+
+            if not candidate_ts:
+                boundaries = []
+            else:
+                scores = torch.stack(candidate_scores)
+                threshold = scores.mean() + self.tsm_threshold_alpha * scores.std(unbiased=False)
+                boundaries_with_scores = []
+                for i, t in enumerate(candidate_ts):
+                    s = scores[i]
+                    left_ok = (i == 0) or (s >= scores[i - 1])
+                    right_ok = (i == len(candidate_ts) - 1) or (s >= scores[i + 1])
+                    if s > threshold and left_ok and right_ok:
+                        boundaries_with_scores.append((t, float(s.item())))
+
+                boundaries_with_scores.sort(key=lambda x: x[1], reverse=True)
+                selected = []
+                for t, _ in boundaries_with_scores:
+                    if all(abs(t - b) >= self.min_event_len for b in selected):
+                        selected.append(t)
+                boundaries = sorted(selected)
+
+            filtered = []
+            prev = 0
+            for b in boundaries:
+                if b - prev >= self.min_event_len and n - b >= self.min_event_len:
+                    filtered.append(b)
+                    prev = b
+            boundaries = filtered
+
+            final_boundaries = []
+            prev = 0
+            for b in boundaries + [n]:
+                while b - prev > self.max_event_len:
+                    prev = prev + self.max_event_len
+                    final_boundaries.append(prev)
+                if b < n:
+                    final_boundaries.append(b)
+                    prev = b
+
+            return self._boundaries_to_spans(final_boundaries, n) or [(0, n - 1)]
+
+    def detect_contrastive_convolution_spans(self, h_valid: torch.Tensor):
+        with torch.no_grad():
+            n = int(h_valid.shape[0])
+            if n <= 0:
+                return []
+            if n <= self.min_event_len * 2:
+                return [(0, n - 1)]
+
+            z = F.normalize(h_valid.detach().float(), dim=-1)
+            tsm = z @ z.t()
+            w = max(1, int(self.tsm_window_size))
+            candidate_ts = []
+            candidate_scores = []
+
+            for t in range(self.min_event_len, n - self.min_event_len + 1):
+                l0, l1 = max(0, t - w), t
+                r0, r1 = t, min(n, t + w)
+                if l1 <= l0 or r1 <= r0:
+                    continue
+
+                ll = self._mean_square_block(tsm, l0, l1, exclude_diag=True)
+                rr = self._mean_square_block(tsm, r0, r1, exclude_diag=True)
+                lr = tsm[l0:l1, r0:r1].mean()
+                score = ll + rr - (2.0 * lr)
+                candidate_ts.append(t)
+                candidate_scores.append(score)
+
+            if not candidate_ts:
+                return [(0, n - 1)]
+
+            scores = torch.stack(candidate_scores)
+            threshold = scores.mean() + self.tsm_threshold_alpha * scores.std(unbiased=False)
+            boundaries = []
+            for i, t in enumerate(candidate_ts):
+                s = scores[i]
+                left_ok = (i == 0) or (s >= scores[i - 1])
+                right_ok = (i == len(candidate_ts) - 1) or (s >= scores[i + 1])
+                if s > threshold and left_ok and right_ok:
+                    boundaries.append(t)
+
+            spans = self._boundaries_to_spans(boundaries, n)
+            return self._finalize_spans(spans, n)
+
+    def detect_kmeans_spans(self, h_valid: torch.Tensor):
+        n = int(h_valid.shape[0])
+        if n <= 0:
+            return []
+        if n <= self.min_event_len * 2:
+            return [(0, n - 1)]
+
+        try:
+            from sklearn.cluster import KMeans
+        except ImportError:
+            return self.detect_window_spans(h_valid)
+
+        with torch.no_grad():
+            z = F.normalize(h_valid.detach().float(), dim=-1)
+            tsm = z @ z.t()
+
+        pos = torch.linspace(0.0, 1.0, n, device=tsm.device).unsqueeze(1)
+        feat = torch.cat([tsm, pos], dim=1).cpu().numpy()
+        k = min(self.kmeans_num_events, max(1, n // max(1, self.min_event_len)))
+        labels = KMeans(n_clusters=k, n_init=10, random_state=42).fit_predict(feat)
+
+        spans = []
+        start = 0
+        for i in range(1, n):
+            if labels[i] != labels[i - 1]:
+                spans.append((start, i - 1))
+                start = i
+        spans.append((start, n - 1))
+
+        return self._finalize_spans(spans, n)
+
+    def detect_event_spans(self, h_valid: torch.Tensor):
+        if self.strategy == "tsm":
+            return self.detect_tsm_spans(h_valid)
+        if self.strategy == "window":
+            return self.detect_window_spans(h_valid)
+        if self.strategy == "contrastive_convolution":
+            return self.detect_contrastive_convolution_spans(h_valid)
+        if self.strategy == "kmeans":
+            return self.detect_kmeans_spans(h_valid)
+        raise ValueError(f"Unsupported event reasoning strategy: {self.strategy}")

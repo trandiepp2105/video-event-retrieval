@@ -23,6 +23,9 @@
   "max_frames": 2048,
   "max_events": 512,
 
+  "event_strategy": "tsm",
+  "event_kmeans_num_events": 10,
+  "event_window_size": 5,
   "tsm_window_size": 4,
   "tsm_threshold_alpha": 0.5,
   "min_event_len": 3,

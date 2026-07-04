@@ -10,6 +10,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoModel
 
+from .event_reasoning import EventReasoner
+
 
 class AnchorMultiHeadSelfAttention(nn.Module):
     """Multi-head self-attention with per-head temporal anchor windows.
@@ -128,6 +130,9 @@ class EventFormerV1DynamicTSM(nn.Module):
         event_anchor_sizes: List[Any] = (1, 2, 3, "all"),
         ff_dim: int = 3072,
         dropout: float = 0.1,
+        event_strategy: str = "tsm",
+        event_kmeans_num_events: int = 10,
+        event_window_size: int = 5,
         tsm_window_size: int = 4,
         tsm_threshold_alpha: float = 0.5,
         min_event_len: int = 3,
@@ -144,6 +149,8 @@ class EventFormerV1DynamicTSM(nn.Module):
         super().__init__()
         if AutoModel is None:
             raise ImportError("transformers is not installed. Install it before creating the model.")
+        if d_model % num_heads != 0:
+            raise ValueError(f"d_model must be divisible by num_heads, got d_model={d_model}, num_heads={num_heads}")
         self.config_dict = dict(
             d_raw=d_raw,
             d_model=d_model,
@@ -161,6 +168,9 @@ class EventFormerV1DynamicTSM(nn.Module):
             event_anchor_sizes=list(event_anchor_sizes),
             ff_dim=ff_dim,
             dropout=dropout,
+            event_strategy=event_strategy,
+            event_kmeans_num_events=event_kmeans_num_events,
+            event_window_size=event_window_size,
             tsm_window_size=tsm_window_size,
             tsm_threshold_alpha=tsm_threshold_alpha,
             min_event_len=min_event_len,
@@ -188,6 +198,7 @@ class EventFormerV1DynamicTSM(nn.Module):
         self.max_event_len = max_event_len
         self.max_frames = max_frames
         self.max_events = max_events
+        self.event_strategy = event_strategy
         self.freeze_text_encoder = freeze_text_encoder
         self.query_pooling = query_pooling
         self.use_modality_specific_query = use_modality_specific_query
@@ -205,6 +216,15 @@ class EventFormerV1DynamicTSM(nn.Module):
 
         self.event_pos_embed = nn.Embedding(max_events, d_model)
         self.event_encoder = AnchorFormerEncoder(event_layers, d_model, num_heads, list(event_anchor_sizes), ff_dim, dropout)
+        self.event_reasoner = EventReasoner(
+            strategy=event_strategy,
+            tsm_window_size=tsm_window_size,
+            tsm_threshold_alpha=tsm_threshold_alpha,
+            min_event_len=min_event_len,
+            max_event_len=max_event_len,
+            kmeans_num_events=event_kmeans_num_events,
+            window_size=event_window_size,
+        )
 
         self.text_encoder = AutoModel.from_pretrained(text_model_name)
         text_dim = self.text_encoder.config.hidden_size
@@ -297,105 +317,9 @@ class EventFormerV1DynamicTSM(nn.Module):
         h = self.frame_encoder(x, feature_mask)
         return h
 
-    @staticmethod
-    def _mean_square_block(tsm: torch.Tensor, start: int, end: int, exclude_diag: bool = True):
-        block = tsm[start:end, start:end]
-        if block.numel() == 0:
-            return torch.tensor(0.0, device=tsm.device)
-        if exclude_diag and block.shape[0] > 1:
-            total = block.sum() - torch.diagonal(block).sum()
-            denom = block.numel() - block.shape[0]
-            return total / max(denom, 1)
-        return block.mean()
-
-    def detect_event_spans(self, h_valid: torch.Tensor) -> List[Tuple[int, int]]:
-        """Rule-based TSM + contrastive boundary detection.
-
-        Returns inclusive spans [(start_idx, end_idx), ...]. Boundary selection is intentionally
-        non-differentiable; gradients still flow through pooled H after spans are chosen.
-        """
-        with torch.no_grad():
-            N = int(h_valid.shape[0])
-            if N <= 0:
-                return []
-            if N <= self.min_event_len * 2:
-                return [(0, N - 1)]
-
-            z = F.normalize(h_valid.detach().float(), dim=-1)
-            tsm = z @ z.t()
-            w = int(self.tsm_window_size)
-            candidate_ts = []
-            candidate_scores = []
-
-            for t in range(self.min_event_len, N - self.min_event_len + 1):
-                l0, l1 = max(0, t - w), t
-                r0, r1 = t, min(N, t + w)
-                if l1 <= l0 or r1 <= r0:
-                    continue
-                ll = self._mean_square_block(tsm, l0, l1, exclude_diag=True)
-                rr = self._mean_square_block(tsm, r0, r1, exclude_diag=True)
-                lr = tsm[l0:l1, r0:r1].mean()
-                rl = tsm[r0:r1, l0:l1].mean()
-                score = ll + rr - lr - rl
-                candidate_ts.append(t)
-                candidate_scores.append(score)
-
-            if not candidate_ts:
-                boundaries = []
-            else:
-                scores = torch.stack(candidate_scores)
-                threshold = scores.mean() + self.tsm_threshold_alpha * scores.std(unbiased=False)
-                boundaries_with_scores = []
-                for i, t in enumerate(candidate_ts):
-                    s = scores[i]
-                    left_ok = (i == 0) or (s >= scores[i - 1])
-                    right_ok = (i == len(candidate_ts) - 1) or (s >= scores[i + 1])
-                    if s > threshold and left_ok and right_ok:
-                        boundaries_with_scores.append((t, float(s.item())))
-
-                # Select high-score boundaries while enforcing minimum distance.
-                boundaries_with_scores.sort(key=lambda x: x[1], reverse=True)
-                selected = []
-                for t, _ in boundaries_with_scores:
-                    if all(abs(t - b) >= self.min_event_len for b in selected):
-                        selected.append(t)
-                boundaries = sorted(selected)
-
-            # Remove boundaries producing too-short edge events.
-            filtered = []
-            prev = 0
-            for b in boundaries:
-                if b - prev >= self.min_event_len and N - b >= self.min_event_len:
-                    filtered.append(b)
-                    prev = b
-            boundaries = filtered
-
-            # Enforce max event length by inserting extra split boundaries.
-            final_boundaries = []
-            prev = 0
-            for b in boundaries + [N]:
-                while b - prev > self.max_event_len:
-                    prev = prev + self.max_event_len
-                    final_boundaries.append(prev)
-                if b < N:
-                    final_boundaries.append(b)
-                    prev = b
-            boundaries = sorted(set(final_boundaries))
-
-            starts = [0] + boundaries
-            ends = boundaries + [N]
-            spans = []
-            for s, e in zip(starts, ends):
-                if e <= s:
-                    continue
-                spans.append((int(s), int(e - 1)))
-            if not spans:
-                spans = [(0, N - 1)]
-            return spans
-
     def _pool_events_for_one_video(self, h_one: torch.Tensor, valid_len: int):
         h_valid = h_one[:valid_len]
-        spans = self.detect_event_spans(h_valid)
+        spans = self.event_reasoner.detect_event_spans(h_valid)
         event_vecs = []
         for s, e in spans:
             event_vecs.append(h_valid[s:e + 1].max(dim=0).values)

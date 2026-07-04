@@ -38,6 +38,9 @@ class TrainConfig:
 
     max_frames: int = 2048
     max_events: int = 512
+    event_strategy: str = "tsm"
+    event_kmeans_num_events: int = 10
+    event_window_size: int = 5
     tsm_window_size: int = 4
     tsm_threshold_alpha: float = 0.5
     min_event_len: int = 3

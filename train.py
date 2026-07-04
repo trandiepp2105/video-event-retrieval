@@ -22,7 +22,13 @@ def parse_args():
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--text-model-name", type=str, default=None)
+    parser.add_argument("--d-model", type=int, default=None)
+    parser.add_argument("--num-heads", type=int, default=None)
+    parser.add_argument("--ff-dim", type=int, default=None)
     parser.add_argument("--query-pooling", type=str, default=None)
+    parser.add_argument("--event-strategy", type=str, default=None)
+    parser.add_argument("--event-kmeans-num-events", type=int, default=None)
+    parser.add_argument("--event-window-size", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--weight-decay", type=float, default=None)
     parser.add_argument("--max-grad-norm", type=float, default=None)
@@ -58,7 +64,13 @@ def build_config(args) -> TrainConfig:
         "num_workers",
         "device",
         "text_model_name",
+        "d_model",
+        "num_heads",
+        "ff_dim",
         "query_pooling",
+        "event_strategy",
+        "event_kmeans_num_events",
+        "event_window_size",
         "lr",
         "weight_decay",
         "max_grad_norm",
