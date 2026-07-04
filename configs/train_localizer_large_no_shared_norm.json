@@ -3,25 +3,43 @@
   "train_manifest": "/kaggle/input/datasets/trandiep2105/activitynet-manifests/manifests/train_v1.jsonl",
   "val_manifest": "/kaggle/input/datasets/trandiep2105/activitynet-manifests/manifests/val_v1.jsonl",
   "feature_dir": "/kaggle/input/datasets/trandiep2105/activitynet-visual-features/visual_features",
-  "output_dir": "/kaggle/working/checkpoints_localizer_no_shared_norm",
-  "retriever_checkpoint": "/kaggle/working/checkpoints_retriever/eventformer_v1_best.pt",
+  "output_dir": "/kaggle/working/checkpoints_localizer_large_no_shared_norm",
+  "retriever_checkpoint": "/kaggle/working/checkpoints_retriever_large/eventformer_v1_best.pt",
+  "localizer_checkpoint": null,
   "shared_norm_negatives": null,
-
-  "text_model_name": "roberta-base",
+  "text_model_name": "roberta-large",
   "freeze_text_encoder": true,
   "query_pooling": "mean",
   "use_modality_specific_query": false,
-  "modalities": ["visual"],
-
-  "d_model": 768,
+  "modalities": [
+    "visual"
+  ],
+  "d_model": 1024,
   "frame_layers": 2,
   "event_layers": 2,
-  "num_heads": 4,
-  "frame_anchor_sizes": [3, 6, 9, "all"],
-  "event_anchor_sizes": [1, 2, 3, "all"],
-  "ff_dim": 3072,
+  "num_heads": 8,
+  "frame_anchor_sizes": [
+    3,
+    6,
+    9,
+    "all",
+    "all",
+    "all",
+    "all",
+    "all"
+  ],
+  "event_anchor_sizes": [
+    1,
+    2,
+    3,
+    "all",
+    "all",
+    "all",
+    "all",
+    "all"
+  ],
+  "ff_dim": 4096,
   "dropout": 0.1,
-
   "max_frames": 2048,
   "max_events": 512,
   "event_strategy": "kmeans",
@@ -31,7 +49,6 @@
   "tsm_threshold_alpha": 0.5,
   "min_event_len": 3,
   "max_event_len": 30,
-
   "lambda_event": 0.8,
   "use_hard_negative": false,
   "lambda_hard": 0.3,
@@ -40,18 +57,16 @@
   "lambda_weak_event": 0.05,
   "weak_positive_margin": 10,
   "temperature": 0.07,
-
   "use_moment_localizer": true,
   "use_cross_attention": true,
   "use_event_auxiliary_loss": true,
   "lambda_event_localizer": 0.8,
   "max_localizer_span_len": 64,
-  "freeze_video_encoder_for_localizer": false,
+  "freeze_video_encoder_for_localizer": true,
   "use_shared_norm": false,
   "shared_norm_num_negatives": 5,
   "segment_duration_sec": 1.5,
-
-  "batch_size": 16,
+  "batch_size": 2,
   "num_workers": 2,
   "epochs": 10,
   "lr": 0.0001,
@@ -64,6 +79,6 @@
   "tokenizer_max_length": 64,
   "seed": 42,
   "save_best_only": true,
-  "best_metric": "svmr_r1_iou_0_5",
-  "best_metric_mode": "max"
+  "best_metric_mode": "max",
+  "best_metric": "svmr_r1_iou_0_5"
 }
