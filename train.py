@@ -56,6 +56,7 @@ def parse_args():
     parser.add_argument("--use-moment-localizer", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--use-cross-attention", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--use-event-auxiliary-loss", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--freeze-video-encoder-for-localizer", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--use-shared-norm", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--save-best-only", action=argparse.BooleanOptionalAction, default=None)
@@ -108,6 +109,7 @@ def build_config(args) -> TrainConfig:
         "use_moment_localizer",
         "use_cross_attention",
         "use_event_auxiliary_loss",
+        "freeze_video_encoder_for_localizer",
         "use_shared_norm",
         "amp",
         "save_best_only",

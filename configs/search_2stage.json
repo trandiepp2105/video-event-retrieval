@@ -1,16 +1,16 @@
 {
-  "train_stage": "retriever",
+  "train_stage": "localizer",
   "train_manifest": "/kaggle/input/datasets/trandiep2105/activitynet-manifests/manifests/train_v1.jsonl",
   "val_manifest": "/kaggle/input/datasets/trandiep2105/activitynet-manifests/manifests/val_v1.jsonl",
   "feature_dir": "/kaggle/input/datasets/trandiep2105/activitynet-visual-features/visual_features",
-  "output_dir": "/kaggle/working/checkpoints_mean_hard03_weak005",
-  "retriever_checkpoint": null,
+  "output_dir": "/kaggle/working/search_2stage",
+  "retriever_checkpoint": "/kaggle/working/checkpoints_retriever/eventformer_v1_best.pt",
+  "localizer_checkpoint": "/kaggle/working/checkpoints_localizer_shared_norm/eventformer_localizer_best.pt",
   "shared_norm_negatives": null,
 
   "text_model_name": "roberta-base",
   "freeze_text_encoder": true,
   "query_pooling": "mean",
-
   "use_modality_specific_query": false,
   "modalities": ["visual"],
 
@@ -25,8 +25,7 @@
 
   "max_frames": 2048,
   "max_events": 512,
-
-  "event_strategy": "tsm",
+  "event_strategy": "kmeans",
   "event_kmeans_num_events": 10,
   "event_window_size": 5,
   "tsm_window_size": 4,
@@ -34,20 +33,9 @@
   "min_event_len": 3,
   "max_event_len": 30,
 
-  "lambda_event": 0.8,
-
-  "use_hard_negative": true,
-  "lambda_hard": 0.3,
-
-  "use_weak_positive": true,
-  "lambda_weak": 0.05,
-  "lambda_weak_event": 0.05,
-  "weak_positive_margin": 10,
-
-  "temperature": 0.07,
-  "use_moment_localizer": false,
-  "use_cross_attention": false,
-  "use_event_auxiliary_loss": false,
+  "use_moment_localizer": true,
+  "use_cross_attention": true,
+  "use_event_auxiliary_loss": true,
   "lambda_event_localizer": 0.8,
   "max_localizer_span_len": 64,
   "freeze_video_encoder_for_localizer": false,
@@ -55,22 +43,25 @@
   "shared_norm_num_negatives": 5,
   "segment_duration_sec": 1.5,
 
-  "batch_size": 128,
-  "num_workers": 2,
-  "epochs": 15,
+  "top_k_videos": 10,
+  "top_k_spans_per_video": 5,
+  "retrieval_weight": 1.0,
+  "localization_weight": 0.1,
+  "score_normalization": "zscore",
 
+  "batch_size": 1,
+  "num_workers": 0,
+  "epochs": 1,
   "lr": 0.0001,
   "weight_decay": 0.01,
   "max_grad_norm": 1.0,
   "amp": true,
   "device": "cuda",
-
   "max_train_samples": null,
   "max_val_samples": null,
   "tokenizer_max_length": 64,
   "seed": 42,
-
-  "save_best_only": true,
-  "best_metric": "event_r1_iou_0_5",
+  "save_best_only": false,
+  "best_metric": "svmr_r1_iou_0_5",
   "best_metric_mode": "max"
 }

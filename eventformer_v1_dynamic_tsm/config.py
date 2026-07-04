@@ -22,6 +22,7 @@ class TrainConfig:
     feature_dir: str = "visual_features"
     output_dir: str = "checkpoints"
     retriever_checkpoint: Optional[str] = None
+    localizer_checkpoint: Optional[str] = None
     shared_norm_negatives: Optional[str] = None
 
     text_model_name: str = "roberta-base"
@@ -61,9 +62,15 @@ class TrainConfig:
     use_event_auxiliary_loss: bool = False
     lambda_event_localizer: float = 0.8
     max_localizer_span_len: int = 64
+    freeze_video_encoder_for_localizer: bool = False
     use_shared_norm: bool = False
     shared_norm_num_negatives: int = 5
     segment_duration_sec: float = 1.5
+    top_k_videos: int = 10
+    top_k_spans_per_video: int = 5
+    retrieval_weight: float = 1.0
+    localization_weight: float = 0.1
+    score_normalization: str = "none"
 
     batch_size: int = 4
     num_workers: int = 2

@@ -114,6 +114,7 @@ class EventFormerLocalizerTrainer:
             use_cross_attention=self.cfg.use_cross_attention,
             use_event_auxiliary_loss=self.cfg.use_event_auxiliary_loss,
             lambda_event_localizer=self.cfg.lambda_event_localizer,
+            freeze_video_encoder_for_localizer=self.cfg.freeze_video_encoder_for_localizer,
         ).to(self.device)
         return self.model
 

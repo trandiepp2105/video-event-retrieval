@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import random
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -96,7 +97,8 @@ class LocalizerSharedNormDataset(Dataset):
         max_frames: Optional[int] = None,
         limit: Optional[int] = None,
     ):
-        self.rows = JsonlReader.read(manifest_path, limit)
+        all_rows = JsonlReader.read(manifest_path, limit=None)
+        self.rows = all_rows[:limit] if limit is not None else all_rows
         self.feature_dir = Path(feature_dir)
         self.max_frames = max_frames
         self.shared_norm_num_negatives = shared_norm_num_negatives
@@ -104,8 +106,12 @@ class LocalizerSharedNormDataset(Dataset):
         self.negatives_by_sample_id = {row["sample_id"]: row for row in negative_rows}
 
         self.video_to_feature_path = {}
-        for row in self.rows:
-            self.video_to_feature_path[row["video_id"]] = row["feature_path"]
+        for row in all_rows:
+            video_id = row.get("video_id")
+            feature_path = row.get("feature_path")
+            if video_id is not None and feature_path is not None:
+                self.video_to_feature_path[video_id] = feature_path
+        self.all_video_ids = sorted(self.video_to_feature_path.keys())
 
     def __len__(self):
         return len(self.rows)
@@ -127,12 +133,35 @@ class LocalizerSharedNormDataset(Dataset):
     def __getitem__(self, idx):
         row = self.rows[idx]
         neg_row = self.negatives_by_sample_id.get(row["sample_id"], {})
-        negative_video_ids = list(neg_row.get("negative_video_ids", []))[: self.shared_norm_num_negatives]
+        requested_negative_ids = list(neg_row.get("negative_video_ids", []))
+        positive_video_id = row["video_id"]
+        if positive_video_id not in self.video_to_feature_path:
+            raise KeyError(f"Positive video_id not found in manifest feature map: {positive_video_id}")
 
-        candidate_video_ids = [row["video_id"]] + negative_video_ids
+        negatives = []
+        for video_id in requested_negative_ids:
+            if video_id == positive_video_id:
+                continue
+            if video_id not in self.video_to_feature_path:
+                continue
+            if video_id in negatives:
+                continue
+            negatives.append(video_id)
+            if len(negatives) >= self.shared_norm_num_negatives:
+                break
+
+        while len(negatives) < self.shared_norm_num_negatives and len(self.all_video_ids) > 1:
+            video_id = random.choice(self.all_video_ids)
+            if video_id == positive_video_id:
+                continue
+            if video_id in negatives:
+                continue
+            negatives.append(video_id)
+
+        candidate_video_ids = [positive_video_id] + negatives[: self.shared_norm_num_negatives]
         candidate_features = []
         for video_id in candidate_video_ids:
-            feature_path = row["feature_path"] if video_id == row["video_id"] else self.video_to_feature_path[video_id]
+            feature_path = row["feature_path"] if video_id == positive_video_id else self.video_to_feature_path[video_id]
             candidate_features.append(self._load_features(feature_path))
 
         gt_start_idx = int(row["gt_start_idx"])

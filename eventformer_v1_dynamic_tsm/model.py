@@ -728,12 +728,17 @@ class EventFormerV1DynamicTSM(nn.Module):
 
     @torch.inference_mode()
     def encode_video(self, features: torch.Tensor, feature_mask: torch.Tensor, normalize: bool = True):
+        return self.encode_video_trainable(features=features, feature_mask=feature_mask, normalize=normalize)
+
+    def encode_video_trainable(self, features: torch.Tensor, feature_mask: torch.Tensor, normalize: bool = False):
         h, g, event_mask, all_spans = self.encode_video_batch(features, feature_mask, return_spans=True)
         if normalize:
             h = F.normalize(h, dim=-1)
             g = F.normalize(g, dim=-1)
         return {
             "frame_embeddings": h,
+            "feature_mask": feature_mask,
+            "frame_mask": feature_mask,
             "event_embeddings": g,
             "event_mask": event_mask,
             "event_spans": all_spans,

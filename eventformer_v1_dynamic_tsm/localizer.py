@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -35,12 +36,14 @@ class EventAwareMomentLocalizer(nn.Module):
         use_cross_attention: bool = False,
         use_event_auxiliary_loss: bool = False,
         lambda_event_localizer: float = 0.8,
+        freeze_video_encoder_for_localizer: bool = False,
     ):
         super().__init__()
         self.use_cross_attention = use_cross_attention
         self.use_event_auxiliary_loss = use_event_auxiliary_loss
         self.lambda_event_localizer = lambda_event_localizer
         self.freeze_text_encoder = freeze_text_encoder
+        self.freeze_video_encoder_for_localizer = freeze_video_encoder_for_localizer
 
         self.video_encoder = EventFormerV1DynamicTSM(
             d_raw=d_raw,
@@ -67,6 +70,9 @@ class EventAwareMomentLocalizer(nn.Module):
         )
         self.text_encoder = self.video_encoder.text_encoder
         self.text_hidden_size = self.video_encoder.text_hidden_size
+        if self.freeze_video_encoder_for_localizer:
+            for p in self.video_encoder.parameters():
+                p.requires_grad = False
 
         self.start_head = nn.Sequential(
             nn.Conv1d(d_model, d_model, kernel_size=3, padding=1),
@@ -132,11 +138,13 @@ class EventAwareMomentLocalizer(nn.Module):
         gt_start_idx: Optional[torch.Tensor] = None,
         gt_end_idx: Optional[torch.Tensor] = None,
     ) -> Dict[str, Optional[torch.Tensor]]:
-        video_out = self.video_encoder.encode_video(
-            features=features,
-            feature_mask=feature_mask,
-            normalize=False,
-        )
+        video_ctx = torch.no_grad() if self.freeze_video_encoder_for_localizer else nullcontext()
+        with video_ctx:
+            video_out = self.video_encoder.encode_video_trainable(
+                features=features,
+                feature_mask=feature_mask,
+                normalize=False,
+            )
         h = video_out["frame_embeddings"]
         g = video_out["event_embeddings"]
         event_spans = video_out["event_spans"]
