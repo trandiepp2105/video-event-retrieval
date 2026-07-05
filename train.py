@@ -25,6 +25,7 @@ def parse_args():
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--text-model-name", type=str, default=None)
+    parser.add_argument("--text-model-path", type=str, default=None)
     parser.add_argument("--d-model", type=int, default=None)
     parser.add_argument("--num-heads", type=int, default=None)
     parser.add_argument("--ff-dim", type=int, default=None)
@@ -78,6 +79,7 @@ def build_config(args) -> TrainConfig:
         "num_workers",
         "device",
         "text_model_name",
+        "text_model_path",
         "d_model",
         "num_heads",
         "ff_dim",

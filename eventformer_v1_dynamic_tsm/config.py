@@ -14,6 +14,13 @@ def _filter_dataclass_kwargs(cls, data: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in data.items() if k in valid}
 
 
+def resolve_text_model_source(text_model_name: str, text_model_path: Optional[str]) -> tuple[str, bool]:
+    path = (text_model_path or "").strip()
+    if path:
+        return path, True
+    return text_model_name, False
+
+
 @dataclass
 class TrainConfig:
     train_stage: str = "retriever"
@@ -26,6 +33,7 @@ class TrainConfig:
     shared_norm_negatives: Optional[str] = None
 
     text_model_name: str = "roberta-base"
+    text_model_path: Optional[str] = None
     freeze_text_encoder: bool = True
     query_pooling: str = "cls"
     use_modality_specific_query: bool = False

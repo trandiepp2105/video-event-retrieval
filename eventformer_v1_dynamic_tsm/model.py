@@ -10,6 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoModel
 
+from .config import resolve_text_model_source
 from .event_reasoning import EventReasoner
 
 
@@ -117,6 +118,7 @@ class EventFormerV1DynamicTSM(nn.Module):
         d_raw: int,
         d_model: int = 768,
         text_model_name: str = "roberta-base",
+        text_model_path: Optional[str] = None,
         freeze_text_encoder: bool = True,
         query_pooling: str = "cls",
         use_modality_specific_query: bool = False,
@@ -155,6 +157,7 @@ class EventFormerV1DynamicTSM(nn.Module):
             d_raw=d_raw,
             d_model=d_model,
             text_model_name=text_model_name,
+            text_model_path=text_model_path,
             freeze_text_encoder=freeze_text_encoder,
             query_pooling=query_pooling,
             use_modality_specific_query=use_modality_specific_query,
@@ -210,6 +213,10 @@ class EventFormerV1DynamicTSM(nn.Module):
                 "query embeddings with ViT+SlowFast visual features."
             )
 
+        self.text_model_name = text_model_name
+        self.text_model_path = text_model_path
+        self.text_model_source, self.text_model_local_only = resolve_text_model_source(text_model_name, text_model_path)
+
         self.visual_projection = nn.Linear(d_raw, d_model)
         self.frame_pos_embed = nn.Embedding(max_frames, d_model)
         self.frame_encoder = AnchorFormerEncoder(frame_layers, d_model, num_heads, list(frame_anchor_sizes), ff_dim, dropout)
@@ -226,7 +233,10 @@ class EventFormerV1DynamicTSM(nn.Module):
             window_size=event_window_size,
         )
 
-        self.text_encoder = AutoModel.from_pretrained(text_model_name)
+        self.text_encoder = AutoModel.from_pretrained(
+            self.text_model_source,
+            local_files_only=self.text_model_local_only,
+        )
         self.text_hidden_size = int(self.text_encoder.config.hidden_size)
         text_dim = self.text_hidden_size
         self.query_projection = nn.Linear(text_dim, d_model)

@@ -8,6 +8,7 @@
   "localizer_checkpoint": null,
   "shared_norm_negatives": null,
   "text_model_name": "roberta-large",
+  "text_model_path": "/kaggle/input/models/tranvandiep21052003/roberta-large/transformers/default/1/roberta-large-hf",
   "freeze_text_encoder": true,
   "query_pooling": "mean",
   "use_modality_specific_query": false,

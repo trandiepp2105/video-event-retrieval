@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 
-from .config import TrainConfig
+from .config import TrainConfig, resolve_text_model_source
 from .data import (
     BatchCollator,
     FeatureManifestDataset,
@@ -31,7 +31,8 @@ class EventFormerLocalizerTrainer:
         self.device = torch.device(cfg.device)
         self.output_dir = Path(cfg.output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.tokenizer = AutoTokenizer.from_pretrained(cfg.text_model_name)
+        tokenizer_source, local_only = resolve_text_model_source(cfg.text_model_name, cfg.text_model_path)
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_source, local_files_only=local_only)
         self.model: Optional[EventAwareMomentLocalizer] = None
 
     def _infer_d_raw(self) -> int:
@@ -94,6 +95,7 @@ class EventFormerLocalizerTrainer:
             d_raw=d_raw,
             d_model=self.cfg.d_model,
             text_model_name=self.cfg.text_model_name,
+            text_model_path=self.cfg.text_model_path,
             freeze_text_encoder=self.cfg.freeze_text_encoder,
             max_frames=self.cfg.max_frames,
             max_events=self.cfg.max_events,

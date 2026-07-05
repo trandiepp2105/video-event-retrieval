@@ -22,6 +22,7 @@ def parse_args():
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--retriever-checkpoint", type=str, default=None)
     parser.add_argument("--shared-norm-negatives", type=str, default=None)
+    parser.add_argument("--text-model-path", type=str, default=None)
     parser.add_argument("--use-cross-attention", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--use-event-auxiliary-loss", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--use-shared-norm", action=argparse.BooleanOptionalAction, default=None)
@@ -40,6 +41,7 @@ def build_config(args) -> TrainConfig:
         "device",
         "retriever_checkpoint",
         "shared_norm_negatives",
+        "text_model_path",
         "use_cross_attention",
         "use_event_auxiliary_loss",
         "use_shared_norm",

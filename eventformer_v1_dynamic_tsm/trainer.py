@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 
-from .config import TrainConfig
+from .config import TrainConfig, resolve_text_model_source
 from .data import BatchCollator, FeatureManifestDataset
 from .io_utils import JsonlReader, save_json, set_seed
 from .metrics import span_iou
@@ -25,7 +25,8 @@ class EventFormerTrainer:
         self.device = torch.device(cfg.device)
         self.output_dir = Path(cfg.output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.tokenizer = AutoTokenizer.from_pretrained(cfg.text_model_name)
+        tokenizer_source, local_only = resolve_text_model_source(cfg.text_model_name, cfg.text_model_path)
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_source, local_files_only=local_only)
         self.model: Optional[EventFormerV1DynamicTSM] = None
 
     def _infer_d_raw(self) -> int:
@@ -68,6 +69,7 @@ class EventFormerTrainer:
             d_raw=d_raw,
             d_model=self.cfg.d_model,
             text_model_name=self.cfg.text_model_name,
+            text_model_path=self.cfg.text_model_path,
             freeze_text_encoder=self.cfg.freeze_text_encoder,
             query_pooling=self.cfg.query_pooling,
             use_modality_specific_query=self.cfg.use_modality_specific_query,

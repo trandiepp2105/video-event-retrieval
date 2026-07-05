@@ -13,7 +13,7 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer
 
-from eventformer_v1_dynamic_tsm.config import TrainConfig
+from eventformer_v1_dynamic_tsm.config import TrainConfig, resolve_text_model_source
 from eventformer_v1_dynamic_tsm.io_utils import JsonlReader, write_jsonl
 from eventformer_v1_dynamic_tsm.model import EventFormerV1DynamicTSM
 
@@ -40,7 +40,8 @@ def main():
     args = parse_args()
     cfg = TrainConfig.from_json(args.config)
     rows = JsonlReader.read(cfg.train_manifest, limit=args.max_samples)
-    tokenizer = AutoTokenizer.from_pretrained(cfg.text_model_name)
+    tokenizer_source, local_only = resolve_text_model_source(cfg.text_model_name, cfg.text_model_path)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_source, local_files_only=local_only)
 
     sample_feature = np.load(resolve_feature_path(cfg.feature_dir, rows[0]["feature_path"]), allow_pickle=True)
     d_raw = int(sample_feature["features"].shape[1])
@@ -48,6 +49,7 @@ def main():
         d_raw=d_raw,
         d_model=cfg.d_model,
         text_model_name=cfg.text_model_name,
+        text_model_path=cfg.text_model_path,
         freeze_text_encoder=cfg.freeze_text_encoder,
         query_pooling=cfg.query_pooling,
         use_modality_specific_query=cfg.use_modality_specific_query,
