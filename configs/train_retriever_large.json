@@ -16,8 +16,8 @@
     "visual"
   ],
   "d_model": 1024,
-  "frame_layers": 2,
-  "event_layers": 2,
+  "frame_layers": 4,
+  "event_layers": 4,
   "num_heads": 8,
   "frame_anchor_sizes": [
     3,
