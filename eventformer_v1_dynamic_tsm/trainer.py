@@ -18,6 +18,49 @@ from .metrics import span_iou
 from .model import EventFormerV1DynamicTSM
 
 
+def frame_topk_inside_gt(frame_scores: torch.Tensor, gt_start: int, gt_end: int, k: int) -> bool:
+    k = min(k, int(frame_scores.numel()))
+    if k <= 0:
+        return False
+    top_idx = torch.topk(frame_scores, k=k).indices.tolist()
+    return any(int(gt_start) <= idx <= int(gt_end) for idx in top_idx)
+
+
+def event_topk_iou(
+    event_scores: torch.Tensor,
+    event_spans: list[tuple[int, int]],
+    gt_start: int,
+    gt_end: int,
+    k: int,
+    threshold: float,
+) -> bool:
+    if len(event_spans) == 0:
+        return False
+    k = min(k, int(event_scores.numel()), len(event_spans))
+    if k <= 0:
+        return False
+    top_idx = torch.topk(event_scores[: len(event_spans)], k=k).indices.tolist()
+    gt = (int(gt_start), int(gt_end))
+    return any(span_iou(event_spans[idx], gt) >= threshold for idx in top_idx)
+
+
+def event_topk_contains_gt_frame(
+    event_scores: torch.Tensor,
+    event_spans: list[tuple[int, int]],
+    gt_start: int,
+    gt_end: int,
+    k: int,
+) -> bool:
+    if len(event_spans) == 0:
+        return False
+    k = min(k, int(event_scores.numel()), len(event_spans))
+    if k <= 0:
+        return False
+    center = (int(gt_start) + int(gt_end)) // 2
+    top_idx = torch.topk(event_scores[: len(event_spans)], k=k).indices.tolist()
+    return any(event_spans[idx][0] <= center <= event_spans[idx][1] for idx in top_idx)
+
+
 class EventFormerTrainer:
     def __init__(self, cfg: TrainConfig):
         self.cfg = cfg
@@ -86,11 +129,18 @@ class EventFormerTrainer:
             event_strategy=self.cfg.event_strategy,
             event_kmeans_num_events=self.cfg.event_kmeans_num_events,
             event_window_size=self.cfg.event_window_size,
+            event_stride=self.cfg.event_stride,
+            event_window_sizes=tuple(self.cfg.event_window_sizes),
+            event_stride_ratio=self.cfg.event_stride_ratio,
+            event_pooling=self.cfg.event_pooling,
             tsm_window_size=self.cfg.tsm_window_size,
             tsm_threshold_alpha=self.cfg.tsm_threshold_alpha,
             min_event_len=self.cfg.min_event_len,
             max_event_len=self.cfg.max_event_len,
+            normalize_embeddings=self.cfg.normalize_embeddings,
+            lambda_frame=self.cfg.lambda_frame,
             lambda_event=self.cfg.lambda_event,
+            weak_positive_weight=self.cfg.weak_positive_weight,
             use_hard_negative=self.cfg.use_hard_negative,
             lambda_hard=self.cfg.lambda_hard,
             use_weak_positive=self.cfg.use_weak_positive,
@@ -132,6 +182,9 @@ class EventFormerTrainer:
                     video_ids=batch.get("video_ids", None),
                 )
                 loss = out["loss"]
+                loss_frame = out.get("loss_frame")
+                loss_event = out.get("loss_event")
+                event_spans = out.get("event_spans")
             if scaler is not None:
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
@@ -143,7 +196,15 @@ class EventFormerTrainer:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.max_grad_norm)
                 optimizer.step()
             total += float(loss.item())
-            pbar.set_postfix(loss=float(loss.item()))
+            postfix = {"loss": f"{float(loss.item()):.4f}"}
+            if loss_frame is not None:
+                postfix["l_frame"] = f"{float(loss_frame.item()):.4f}"
+            if loss_event is not None:
+                postfix["l_event"] = f"{float(loss_event.item()):.4f}"
+            if event_spans:
+                num_events = [len(spans) for spans in event_spans]
+                postfix["ev_mean"] = f"{(sum(num_events) / max(1, len(num_events))):.1f}"
+            pbar.set_postfix(postfix)
         return total / max(1, len(loader))
 
     @torch.inference_mode()
@@ -177,11 +238,18 @@ class EventFormerTrainer:
         total = 0
         frame_r1 = 0
         frame_r5 = 0
+        frame_r10 = 0
+        event_r1_contains = 0
+        event_r5_contains = 0
+        event_r10_contains = 0
         event_r1_iou03 = 0
-        event_r1_iou05 = 0
         event_r5_iou03 = 0
+        event_r10_iou03 = 0
+        event_r1_iou05 = 0
         event_r5_iou05 = 0
+        event_r10_iou05 = 0
         top1_iou_sum = 0.0
+        num_events_all = []
 
         for batch in tqdm(loader, desc="val_retrieval"):
             batch = self._move_batch(batch)
@@ -211,48 +279,64 @@ class EventFormerTrainer:
 
                 frame_scores = h[b] @ q[b]
                 frame_scores = frame_scores.masked_fill(~feature_mask[b].bool(), float("-inf"))
-                k_frame = min(5, int(feature_mask[b].sum().item()))
-                if k_frame > 0:
-                    top_frame_idx = torch.topk(frame_scores, k=k_frame).indices.tolist()
-                    if s <= top_frame_idx[0] <= e:
-                        frame_r1 += 1
-                    if any(s <= idx <= e for idx in top_frame_idx):
-                        frame_r5 += 1
+                if frame_topk_inside_gt(frame_scores, s, e, 1):
+                    frame_r1 += 1
+                if frame_topk_inside_gt(frame_scores, s, e, 5):
+                    frame_r5 += 1
+                if frame_topk_inside_gt(frame_scores, s, e, 10):
+                    frame_r10 += 1
 
                 event_scores = g[b] @ q[b]
                 event_scores = event_scores.masked_fill(~event_mask[b].bool(), float("-inf"))
                 num_events = int(event_mask[b].sum().item())
-                k_event = min(5, num_events)
-                if k_event <= 0:
+                num_events_all.append(num_events)
+                if num_events <= 0:
                     continue
 
-                top_event_idx = torch.topk(event_scores, k=k_event).indices.tolist()
+                top_event_idx = torch.topk(event_scores[:num_events], k=min(1, num_events)).indices.tolist()
                 gt_span = (s, e)
-                top_ious = []
-                for event_idx in top_event_idx:
-                    pred_span = event_spans[b][event_idx]
-                    top_ious.append(span_iou(pred_span, gt_span))
-
-                top1_iou = top_ious[0]
+                top1_iou = span_iou(event_spans[b][top_event_idx[0]], gt_span) if top_event_idx else 0.0
                 top1_iou_sum += top1_iou
-                if top1_iou >= 0.3:
+                if event_topk_contains_gt_frame(event_scores, event_spans[b], s, e, 1):
+                    event_r1_contains += 1
+                if event_topk_contains_gt_frame(event_scores, event_spans[b], s, e, 5):
+                    event_r5_contains += 1
+                if event_topk_contains_gt_frame(event_scores, event_spans[b], s, e, 10):
+                    event_r10_contains += 1
+                if event_topk_iou(event_scores, event_spans[b], s, e, 1, 0.3):
                     event_r1_iou03 += 1
-                if top1_iou >= 0.5:
-                    event_r1_iou05 += 1
-                if max(top_ious) >= 0.3:
+                if event_topk_iou(event_scores, event_spans[b], s, e, 5, 0.3):
                     event_r5_iou03 += 1
-                if max(top_ious) >= 0.5:
+                if event_topk_iou(event_scores, event_spans[b], s, e, 10, 0.3):
+                    event_r10_iou03 += 1
+                if event_topk_iou(event_scores, event_spans[b], s, e, 1, 0.5):
+                    event_r1_iou05 += 1
+                if event_topk_iou(event_scores, event_spans[b], s, e, 5, 0.5):
                     event_r5_iou05 += 1
+                if event_topk_iou(event_scores, event_spans[b], s, e, 10, 0.5):
+                    event_r10_iou05 += 1
 
         denom = max(total, 1)
+        num_events_min = min(num_events_all) if num_events_all else 0
+        num_events_mean = (sum(num_events_all) / len(num_events_all)) if num_events_all else 0.0
+        num_events_max = max(num_events_all) if num_events_all else 0
         return {
             "frame_r1_inside_gt": frame_r1 / denom,
             "frame_r5_inside_gt": frame_r5 / denom,
+            "frame_r10_inside_gt": frame_r10 / denom,
+            "event_r1_contains_gt_frame": event_r1_contains / denom,
+            "event_r5_contains_gt_frame": event_r5_contains / denom,
+            "event_r10_contains_gt_frame": event_r10_contains / denom,
             "event_r1_iou_0_3": event_r1_iou03 / denom,
-            "event_r1_iou_0_5": event_r1_iou05 / denom,
             "event_r5_iou_0_3": event_r5_iou03 / denom,
+            "event_r10_iou_0_3": event_r10_iou03 / denom,
+            "event_r1_iou_0_5": event_r1_iou05 / denom,
             "event_r5_iou_0_5": event_r5_iou05 / denom,
-            "mean_top1_iou": top1_iou_sum / denom,
+            "event_r10_iou_0_5": event_r10_iou05 / denom,
+            "mean_top1_event_iou": top1_iou_sum / denom,
+            "num_events_min": num_events_min,
+            "num_events_mean": num_events_mean,
+            "num_events_max": num_events_max,
         }
 
     def save_checkpoint(self, name: str, epoch: int, val_loss: Optional[float]):

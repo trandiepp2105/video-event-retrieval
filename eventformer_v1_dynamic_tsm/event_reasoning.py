@@ -1,21 +1,93 @@
 from __future__ import annotations
 
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
 
 
+def build_window_events(valid_len: int, window_size: int, stride: Optional[int] = None) -> List[Tuple[int, int]]:
+    if valid_len <= 0:
+        return []
+    if window_size <= 0:
+        raise ValueError(f"event_window_size must be > 0, got {window_size}")
+
+    if stride is None:
+        stride = window_size
+    stride = max(1, int(stride))
+
+    if valid_len <= window_size:
+        return [(0, valid_len - 1)]
+
+    spans: List[Tuple[int, int]] = []
+    for start in range(0, valid_len, stride):
+        end = min(start + window_size - 1, valid_len - 1)
+        if start <= end:
+            spans.append((start, end))
+        if end == valid_len - 1:
+            break
+    return spans
+
+
+def build_multiscale_window_events(
+    valid_len: int,
+    window_sizes: Tuple[int, ...] = (4, 8, 16, 32, 64),
+    stride_ratio: float = 0.5,
+    max_events: Optional[int] = None,
+) -> List[Tuple[int, int]]:
+    if valid_len <= 0:
+        return []
+
+    spans: List[Tuple[int, int]] = []
+    for window_size in window_sizes:
+        window_size = int(window_size)
+        if window_size <= 0:
+            continue
+        if valid_len <= window_size:
+            spans.append((0, valid_len - 1))
+            continue
+
+        stride = max(1, int(window_size * stride_ratio))
+        spans.extend(build_window_events(valid_len=valid_len, window_size=window_size, stride=stride))
+
+    seen = set()
+    unique_spans: List[Tuple[int, int]] = []
+    for span in spans:
+        if span not in seen:
+            seen.add(span)
+            unique_spans.append(span)
+    spans = unique_spans
+
+    if max_events is not None and len(spans) > max_events:
+        if max_events <= 0:
+            return []
+        if max_events == 1:
+            return [spans[0]]
+        indices = []
+        for idx in range(max_events):
+            position = round(idx * (len(spans) - 1) / (max_events - 1))
+            indices.append(int(position))
+        spans = [spans[idx] for idx in indices]
+
+    if len(spans) == 0:
+        spans = [(0, valid_len - 1)]
+    return spans
+
+
 class EventReasoner:
     def __init__(
         self,
-        strategy: str = "tsm",
+        strategy: str = "window",
         tsm_window_size: int = 4,
         tsm_threshold_alpha: float = 0.5,
         min_event_len: int = 3,
         max_event_len: int = 30,
         kmeans_num_events: int = 10,
-        window_size: int = 5,
+        window_size: int = 8,
+        stride: Optional[int] = None,
+        window_sizes: Tuple[int, ...] = (4, 8, 16, 32, 64),
+        stride_ratio: float = 0.5,
+        max_events: int = 1024,
     ):
         self.strategy = strategy
         self.tsm_window_size = tsm_window_size
@@ -24,6 +96,10 @@ class EventReasoner:
         self.max_event_len = max_event_len
         self.kmeans_num_events = kmeans_num_events
         self.window_size = window_size
+        self.stride = stride
+        self.window_sizes = tuple(window_sizes)
+        self.stride_ratio = stride_ratio
+        self.max_events = max_events
 
     @staticmethod
     def _mean_square_block(tsm: torch.Tensor, start: int, end: int, exclude_diag: bool = True):
@@ -111,16 +187,16 @@ class EventReasoner:
 
     def detect_window_spans(self, h_valid: torch.Tensor):
         n = int(h_valid.shape[0])
-        if n <= 0:
-            return []
-        w = max(1, int(self.window_size))
-        spans = []
-        start = 0
-        while start < n:
-            end = min(n - 1, start + w - 1)
-            spans.append((start, end))
-            start = end + 1
-        return spans if spans else [(0, n - 1)]
+        return build_window_events(valid_len=n, window_size=int(self.window_size), stride=self.stride)
+
+    def detect_multiscale_window_spans(self, h_valid: torch.Tensor):
+        n = int(h_valid.shape[0])
+        return build_multiscale_window_events(
+            valid_len=n,
+            window_sizes=self.window_sizes,
+            stride_ratio=self.stride_ratio,
+            max_events=self.max_events,
+        )
 
     def detect_tsm_spans(self, h_valid: torch.Tensor) -> List[Tuple[int, int]]:
         with torch.no_grad():
@@ -264,12 +340,22 @@ class EventReasoner:
         return self._finalize_spans(spans, n)
 
     def detect_event_spans(self, h_valid: torch.Tensor):
-        if self.strategy == "tsm":
-            return self.detect_tsm_spans(h_valid)
         if self.strategy == "window":
             return self.detect_window_spans(h_valid)
-        if self.strategy == "contrastive_convolution":
-            return self.detect_contrastive_convolution_spans(h_valid)
-        if self.strategy == "kmeans":
-            return self.detect_kmeans_spans(h_valid)
-        raise ValueError(f"Unsupported event reasoning strategy: {self.strategy}")
+        if self.strategy == "multiscale_window":
+            return self.detect_multiscale_window_spans(h_valid)
+        if self.strategy == "tsm":
+            spans = self.detect_tsm_spans(h_valid)
+        elif self.strategy == "contrastive_convolution":
+            spans = self.detect_contrastive_convolution_spans(h_valid)
+        elif self.strategy == "kmeans":
+            spans = self.detect_kmeans_spans(h_valid)
+        else:
+            raise ValueError(f"Unsupported event reasoning strategy: {self.strategy}")
+
+        valid_len = int(h_valid.shape[0])
+        if valid_len > max(1, int(self.window_size)) * 2 and len(spans) <= 1:
+            return build_window_events(valid_len=valid_len, window_size=int(self.window_size), stride=self.stride)
+        if len(spans) == 0 and valid_len > 0:
+            return [(0, valid_len - 1)]
+        return spans

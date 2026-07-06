@@ -35,7 +35,7 @@ class TrainConfig:
     text_model_name: str = "roberta-base"
     text_model_path: Optional[str] = None
     freeze_text_encoder: bool = True
-    query_pooling: str = "cls"
+    query_pooling: str = "attention"
     use_modality_specific_query: bool = False
     modalities: Tuple[str, ...] = ("visual",)
 
@@ -50,21 +50,28 @@ class TrainConfig:
 
     max_frames: int = 2048
     max_events: int = 512
-    event_strategy: str = "tsm"
+    event_strategy: str = "window"
     event_kmeans_num_events: int = 10
-    event_window_size: int = 5
+    event_window_size: int = 8
+    event_stride: Optional[int] = None
+    event_window_sizes: Tuple[int, ...] = (4, 8, 16, 32, 64)
+    event_stride_ratio: float = 0.5
+    event_pooling: str = "max"
     tsm_window_size: int = 4
     tsm_threshold_alpha: float = 0.5
     min_event_len: int = 3
     max_event_len: int = 30
-    lambda_event: float = 0.8
+    normalize_embeddings: bool = True
+    lambda_frame: float = 0.8
+    lambda_event: float = 1.0
+    weak_positive_weight: float = 0.5
     use_hard_negative: bool = True
     lambda_hard: float = 1.0
     use_weak_positive: bool = True
     lambda_weak: float = 0.1
     lambda_weak_event: Optional[float] = None
     weak_positive_margin: int = 10
-    temperature: float = 0.07
+    temperature: float = 0.01
     use_moment_localizer: bool = False
     use_cross_attention: bool = False
     use_event_auxiliary_loss: bool = False
@@ -93,7 +100,7 @@ class TrainConfig:
     tokenizer_max_length: int = 64
     seed: int = 42
     save_best_only: bool = False
-    best_metric: str = "event_r1_iou_0_5"
+    best_metric: str = "event_r5_iou_0_3"
     best_metric_mode: str = "max"
 
     @classmethod
@@ -103,6 +110,7 @@ class TrainConfig:
         cfg.modalities = tuple(cfg.modalities)
         cfg.frame_anchor_sizes = tuple(cfg.frame_anchor_sizes)
         cfg.event_anchor_sizes = tuple(cfg.event_anchor_sizes)
+        cfg.event_window_sizes = tuple(cfg.event_window_sizes)
         return cfg
 
     def to_dict(self) -> Dict[str, Any]:
