@@ -188,6 +188,17 @@ class AnchorFormerEncoder(nn.Module):
 
 
 class EventFormerV1DynamicTSM(nn.Module):
+    PAPER_QUERY_POOLING = "attention"
+    PAPER_EVENT_STRATEGY = "contrastive_convolution"
+    PAPER_EVENT_POOLING = "max"
+    PAPER_MODALITIES = ("visual",)
+    PAPER_QUERY_TRANSFORMER_LAYERS = 1
+    PAPER_DROPOUT = 0.1
+    PAPER_LAMBDA_FRAME = 1.0
+    PAPER_LAMBDA_EVENT = 0.8
+    PAPER_WEAK_POSITIVE_WEIGHT = 0.5
+    PAPER_TEMPERATURE = 0.01
+
     def __init__(
         self,
         d_raw: int,
@@ -211,7 +222,7 @@ class EventFormerV1DynamicTSM(nn.Module):
         event_anchor_sizes: List[Any] = (1, 2, 3, "all"),
         ff_dim: int = 3072,
         dropout: float = 0.1,
-        event_strategy: str = "window",
+        event_strategy: str = "contrastive_convolution",
         event_kmeans_num_events: int = 10,
         event_window_size: int = 8,
         event_stride: Optional[int] = None,
@@ -223,8 +234,8 @@ class EventFormerV1DynamicTSM(nn.Module):
         min_event_len: int = 3,
         max_event_len: int = 30,
         normalize_embeddings: bool = True,
-        lambda_frame: float = 0.8,
-        lambda_event: float = 1.0,
+        lambda_frame: float = 1.0,
+        lambda_event: float = 0.8,
         weak_positive_weight: float = 0.5,
         use_hard_negative: bool = True,
         lambda_hard: float = 1.0,
@@ -239,19 +250,30 @@ class EventFormerV1DynamicTSM(nn.Module):
             raise ImportError("transformers is not installed. Install it before creating the model.")
         if d_model % num_heads != 0:
             raise ValueError(f"d_model must be divisible by num_heads, got d_model={d_model}, num_heads={num_heads}")
+        paper_query_pooling = self.PAPER_QUERY_POOLING
+        paper_event_strategy = self.PAPER_EVENT_STRATEGY
+        paper_event_pooling = self.PAPER_EVENT_POOLING
+        paper_modalities = self.PAPER_MODALITIES
+        paper_query_transformer_layers = self.PAPER_QUERY_TRANSFORMER_LAYERS
+        paper_dropout = self.PAPER_DROPOUT
+        paper_lambda_frame = self.PAPER_LAMBDA_FRAME
+        paper_lambda_event = self.PAPER_LAMBDA_EVENT
+        paper_weak_positive_weight = self.PAPER_WEAK_POSITIVE_WEIGHT
+        paper_temperature = self.PAPER_TEMPERATURE
+
         self.config_dict = dict(
             d_raw=d_raw,
             d_model=d_model,
             text_model_name=text_model_name,
             text_model_path=text_model_path,
             freeze_text_encoder=freeze_text_encoder,
-            query_pooling=query_pooling,
-            query_transformer_layers=query_transformer_layers,
+            query_pooling=paper_query_pooling,
+            query_transformer_layers=paper_query_transformer_layers,
             query_transformer_heads=query_transformer_heads,
             query_transformer_ff_dim=query_transformer_ff_dim,
             query_transformer_dropout=query_transformer_dropout,
-            use_modality_specific_query=use_modality_specific_query,
-            modalities=list(modalities),
+            use_modality_specific_query=False,
+            modalities=list(paper_modalities),
             max_frames=max_frames,
             max_events=max_events,
             frame_layers=frame_layers,
@@ -260,61 +282,55 @@ class EventFormerV1DynamicTSM(nn.Module):
             frame_anchor_sizes=list(frame_anchor_sizes),
             event_anchor_sizes=list(event_anchor_sizes),
             ff_dim=ff_dim,
-            dropout=dropout,
-            event_strategy=event_strategy,
+            dropout=paper_dropout,
+            event_strategy=paper_event_strategy,
             event_kmeans_num_events=event_kmeans_num_events,
             event_window_size=event_window_size,
             event_stride=event_stride,
             event_window_sizes=tuple(event_window_sizes),
             event_stride_ratio=event_stride_ratio,
-            event_pooling=event_pooling,
+            event_pooling=paper_event_pooling,
             tsm_window_size=tsm_window_size,
             tsm_threshold_alpha=tsm_threshold_alpha,
             min_event_len=min_event_len,
             max_event_len=max_event_len,
             normalize_embeddings=normalize_embeddings,
-            lambda_frame=lambda_frame,
-            lambda_event=lambda_event,
-            weak_positive_weight=weak_positive_weight,
-            use_hard_negative=use_hard_negative,
+            lambda_frame=paper_lambda_frame,
+            lambda_event=paper_lambda_event,
+            weak_positive_weight=paper_weak_positive_weight,
+            use_hard_negative=True,
             lambda_hard=lambda_hard,
-            use_weak_positive=use_weak_positive,
+            use_weak_positive=True,
             lambda_weak=lambda_weak,
             lambda_weak_event=lambda_weak if lambda_weak_event is None else lambda_weak_event,
             weak_positive_margin=weak_positive_margin,
-            temperature=temperature,
+            temperature=paper_temperature,
         )
         self.d_model = d_model
         self.normalize_embeddings = normalize_embeddings
-        self.lambda_frame = lambda_frame
-        self.lambda_event = lambda_event
-        self.weak_positive_weight = weak_positive_weight
-        self.use_hard_negative = use_hard_negative
+        self.lambda_frame = paper_lambda_frame
+        self.lambda_event = paper_lambda_event
+        self.weak_positive_weight = paper_weak_positive_weight
+        self.use_hard_negative = True
         self.lambda_hard = lambda_hard
-        self.use_weak_positive = use_weak_positive
+        self.use_weak_positive = True
         self.lambda_weak = lambda_weak
         self.lambda_weak_event = lambda_weak if lambda_weak_event is None else lambda_weak_event
         self.weak_positive_margin = weak_positive_margin
-        self.temperature = temperature
+        self.temperature = paper_temperature
         self.tsm_window_size = tsm_window_size
         self.tsm_threshold_alpha = tsm_threshold_alpha
         self.min_event_len = min_event_len
         self.max_event_len = max_event_len
         self.max_frames = max_frames
         self.max_events = max_events
-        self.event_strategy = event_strategy
-        self.event_pooling = event_pooling
+        self.event_strategy = paper_event_strategy
+        self.event_pooling = paper_event_pooling
         self.freeze_text_encoder = freeze_text_encoder
-        self.query_pooling = query_pooling
-        self.query_transformer_layers = max(0, int(query_transformer_layers))
-        self.use_modality_specific_query = use_modality_specific_query
-        self.modalities = tuple(modalities)
-        if self.use_modality_specific_query and "visual" not in self.modalities:
-            raise ValueError(
-                "modalities must include 'visual' when use_modality_specific_query=True, "
-                "because the current visual-only retriever uses q_dict['visual'] to match "
-                "query embeddings with ViT+SlowFast visual features."
-            )
+        self.query_pooling = paper_query_pooling
+        self.query_transformer_layers = paper_query_transformer_layers
+        self.use_modality_specific_query = False
+        self.modalities = paper_modalities
 
         self.text_model_name = text_model_name
         self.text_model_path = text_model_path
@@ -322,12 +338,12 @@ class EventFormerV1DynamicTSM(nn.Module):
 
         self.visual_projection = nn.Linear(d_raw, d_model)
         self.frame_pos_embed = nn.Embedding(max_frames, d_model)
-        self.frame_encoder = AnchorFormerEncoder(frame_layers, d_model, num_heads, list(frame_anchor_sizes), ff_dim, dropout)
+        self.frame_encoder = AnchorFormerEncoder(frame_layers, d_model, num_heads, list(frame_anchor_sizes), ff_dim, paper_dropout)
 
         self.event_pos_embed = nn.Embedding(max_events, d_model)
-        self.event_encoder = AnchorFormerEncoder(event_layers, d_model, num_heads, list(event_anchor_sizes), ff_dim, dropout)
+        self.event_encoder = AnchorFormerEncoder(event_layers, d_model, num_heads, list(event_anchor_sizes), ff_dim, paper_dropout)
         self.event_reasoner = EventReasoner(
-            strategy=event_strategy,
+            strategy=paper_event_strategy,
             tsm_window_size=tsm_window_size,
             tsm_threshold_alpha=tsm_threshold_alpha,
             min_event_len=min_event_len,
@@ -353,7 +369,7 @@ class EventFormerV1DynamicTSM(nn.Module):
                 f"got hidden_size={text_dim}, query_transformer_heads={self.query_transformer_heads}"
             )
         self.query_transformer_ff_dim = int(query_transformer_ff_dim or text_dim * 4)
-        self.query_transformer_dropout = float(dropout if query_transformer_dropout is None else query_transformer_dropout)
+        self.query_transformer_dropout = float(paper_dropout if query_transformer_dropout is None else query_transformer_dropout)
         if self.query_transformer_layers > 0:
             query_layer = nn.TransformerEncoderLayer(
                 d_model=text_dim,
@@ -394,28 +410,13 @@ class EventFormerV1DynamicTSM(nn.Module):
             for p in self.text_encoder.parameters():
                 p.requires_grad = False
 
-        self.logit_scale_frame = nn.Parameter(torch.log(torch.tensor(1.0 / temperature)))
-        self.logit_scale_event = nn.Parameter(torch.log(torch.tensor(1.0 / temperature)))
-
     def _pool_query_tokens(self, token_emb: torch.Tensor, attention_mask: torch.Tensor):
-        if self.query_pooling == "cls":
-            return token_emb[:, 0]
-
         mask = attention_mask.bool()
-
-        if self.query_pooling == "mean":
-            mask_f = mask.unsqueeze(-1).to(token_emb.dtype)
-            pooled = (token_emb * mask_f).sum(dim=1) / mask_f.sum(dim=1).clamp(min=1.0)
-            return pooled
-
-        if self.query_pooling == "attention":
-            scores = self.query_attn_pool(token_emb).squeeze(-1)
-            scores = scores.masked_fill(~mask, float("-inf"))
-            weights = torch.softmax(scores, dim=-1)
-            pooled = torch.sum(token_emb * weights.unsqueeze(-1), dim=1)
-            return pooled
-
-        raise ValueError(f"Unknown query_pooling: {self.query_pooling}")
+        scores = self.query_attn_pool(token_emb).squeeze(-1)
+        scores = scores.masked_fill(~mask, float("-inf"))
+        weights = torch.softmax(scores, dim=-1)
+        pooled = torch.sum(token_emb * weights.unsqueeze(-1), dim=1)
+        return pooled
 
     def _encode_query_tokens(self, input_ids: torch.Tensor, attention_mask: torch.Tensor):
         if self.freeze_text_encoder:
@@ -489,6 +490,33 @@ class EventFormerV1DynamicTSM(nn.Module):
         event_x = event_x * event_mask.unsqueeze(-1).to(event_x.dtype)
         event_embeddings = self.event_encoder(event_x, event_mask)
         return frame_embeddings, event_embeddings, event_mask, event_spans_batch
+
+    def compute_retrieval_scores(
+        self,
+        query_embedding: torch.Tensor,
+        frame_embeddings: torch.Tensor,
+        event_embeddings: torch.Tensor,
+        feature_mask: torch.Tensor,
+        event_mask: torch.Tensor,
+    ):
+        q_norm = F.normalize(query_embedding, dim=-1) if self.normalize_embeddings else query_embedding
+        h_norm = F.normalize(frame_embeddings, dim=-1) if self.normalize_embeddings else frame_embeddings
+        g_norm = F.normalize(event_embeddings, dim=-1) if self.normalize_embeddings else event_embeddings
+
+        neg_inf = torch.finfo(q_norm.dtype).min
+        frame_scores = torch.einsum("bd,bnd->bn", q_norm, h_norm).masked_fill(~feature_mask.bool(), neg_inf)
+        event_scores = torch.einsum("bd,bmd->bm", q_norm, g_norm).masked_fill(~event_mask.bool(), neg_inf)
+
+        frame_video_scores = frame_scores.max(dim=1).values
+        event_video_scores = event_scores.max(dim=1).values
+        video_scores = torch.where(event_mask.any(dim=1), event_video_scores, frame_video_scores)
+        return {
+            "frame_scores": frame_scores,
+            "event_scores": event_scores,
+            "frame_video_scores": frame_video_scores,
+            "event_video_scores": event_video_scores,
+            "video_scores": video_scores,
+        }
 
     def _build_gt_mask(
         self,
@@ -606,7 +634,46 @@ class EventFormerV1DynamicTSM(nn.Module):
             "span_mask": valid_event_mask,
         }
 
-    def _inbatch_contrastive_loss(
+    def _mine_hard_negative_scores_per_video(
+        self,
+        query_embedding: torch.Tensor,
+        candidate_embeddings: torch.Tensor,
+        candidate_mask: torch.Tensor,
+    ):
+        q = F.normalize(query_embedding, dim=-1)
+        candidates = F.normalize(candidate_embeddings, dim=-1)
+        batch_size = q.shape[0]
+        neg_inf = torch.finfo(q.dtype).min
+        hardest_scores = q.new_full((batch_size, batch_size), neg_inf)
+
+        for video_idx in range(batch_size):
+            valid_local = candidate_mask[video_idx].bool()
+            if not valid_local.any():
+                continue
+            scores = q @ candidates[video_idx, valid_local].transpose(0, 1)
+            hardest_scores[:, video_idx] = scores.max(dim=1).values
+        return hardest_scores
+
+    def _query_to_candidates_info_nce(
+        self,
+        pos_scores: torch.Tensor,
+        neg_scores_by_video: torch.Tensor,
+        valid_mask: Optional[torch.Tensor] = None,
+    ):
+        batch_size = pos_scores.shape[0]
+        neg_inf = torch.finfo(pos_scores.dtype).min
+        self_mask = torch.eye(batch_size, dtype=torch.bool, device=pos_scores.device)
+        neg_scores = neg_scores_by_video.masked_fill(self_mask, neg_inf)
+        logits = torch.cat([pos_scores.unsqueeze(1), neg_scores], dim=1) / self.temperature
+        targets = torch.zeros(batch_size, dtype=torch.long, device=logits.device)
+        if valid_mask is not None:
+            valid_mask = valid_mask.bool()
+            if not valid_mask.any():
+                return pos_scores.sum() * 0.0, logits
+            return F.cross_entropy(logits[valid_mask], targets[valid_mask]), logits
+        return F.cross_entropy(logits, targets), logits
+
+    def _candidate_to_query_info_nce(
         self,
         query_embedding: torch.Tensor,
         positive_embeddings: torch.Tensor,
@@ -614,17 +681,14 @@ class EventFormerV1DynamicTSM(nn.Module):
     ):
         q = F.normalize(query_embedding, dim=-1)
         positives = F.normalize(positive_embeddings, dim=-1)
-        logits = (q @ positives.t()) / self.temperature
+        logits = (positives @ q.t()) / self.temperature
         targets = torch.arange(logits.shape[0], device=logits.device)
         if valid_mask is not None:
             valid_mask = valid_mask.bool()
             if not valid_mask.any():
-                zero = query_embedding.sum() * 0.0
-                return zero, logits
-            loss = F.cross_entropy(logits[valid_mask], targets[valid_mask])
-            return loss, logits
-        loss = F.cross_entropy(logits, targets)
-        return loss, logits
+                return query_embedding.sum() * 0.0, logits
+            return F.cross_entropy(logits[valid_mask], targets[valid_mask]), logits
+        return F.cross_entropy(logits, targets), logits
 
     def compute_frame_contrastive_loss(
         self,
@@ -642,16 +706,30 @@ class EventFormerV1DynamicTSM(nn.Module):
             feature_mask=feature_mask,
         )
         valid_positive = mined["gt_mask"].any(dim=1)
-        loss_frame, _ = self._inbatch_contrastive_loss(
+        batch_idx = torch.arange(query_embedding.shape[0], device=query_embedding.device)
+        pos_scores = mined["frame_scores"][batch_idx, mined["pos_frame_idx"]]
+        hard_neg_scores = self._mine_hard_negative_scores_per_video(
+            query_embedding=query_embedding,
+            candidate_embeddings=frame_embeddings,
+            candidate_mask=mined["valid_mask"],
+        )
+        loss_q2f, _ = self._query_to_candidates_info_nce(
+            pos_scores=pos_scores,
+            neg_scores_by_video=hard_neg_scores,
+            valid_mask=valid_positive,
+        )
+        loss_f2q, _ = self._candidate_to_query_info_nce(
             query_embedding=query_embedding,
             positive_embeddings=mined["pos_frames"],
             valid_mask=valid_positive,
         )
+        loss_frame = loss_q2f + loss_f2q
 
         if self.use_weak_positive and self.weak_positive_weight > 0:
-            loss_weak, _ = self._inbatch_contrastive_loss(
-                query_embedding=query_embedding,
-                positive_embeddings=mined["weak_frames"],
+            weak_scores = mined["frame_scores"][batch_idx, mined["weak_frame_idx"]]
+            loss_weak, _ = self._query_to_candidates_info_nce(
+                pos_scores=weak_scores,
+                neg_scores_by_video=hard_neg_scores.detach(),
                 valid_mask=mined["weak_valid_mask"],
             )
             loss_frame = loss_frame + (self.weak_positive_weight * loss_weak)
@@ -684,12 +762,29 @@ class EventFormerV1DynamicTSM(nn.Module):
             gt_start_idx=mined_frames["gt_start"],
             gt_end_idx=mined_frames["gt_end"],
         )
-        loss_event, _ = self._inbatch_contrastive_loss(
+        batch_idx = torch.arange(query_embedding.shape[0], device=query_embedding.device)
+        event_scores = torch.einsum(
+            "bd,bmd->bm",
+            F.normalize(query_embedding, dim=-1),
+            F.normalize(event_embeddings, dim=-1),
+        ).masked_fill(~event_mask.bool(), torch.finfo(event_embeddings.dtype).min)
+        pos_event_scores = event_scores[batch_idx, mined_events["pos_event_idx"]]
+        hard_neg_event_scores = self._mine_hard_negative_scores_per_video(
+            query_embedding=query_embedding,
+            candidate_embeddings=event_embeddings,
+            candidate_mask=event_mask,
+        )
+        loss_q2e, _ = self._query_to_candidates_info_nce(
+            pos_scores=pos_event_scores,
+            neg_scores_by_video=hard_neg_event_scores,
+            valid_mask=mined_events["valid_positive"],
+        )
+        loss_e2q, _ = self._candidate_to_query_info_nce(
             query_embedding=query_embedding,
             positive_embeddings=mined_events["pos_events"],
             valid_mask=mined_events["valid_positive"],
         )
-        return loss_event
+        return loss_q2e + loss_e2q
 
     def forward(
         self,
@@ -701,21 +796,16 @@ class EventFormerV1DynamicTSM(nn.Module):
         gt_end_idx: Optional[torch.Tensor],
         video_ids=None,
     ):
-        if self.use_modality_specific_query:
-            q_dict = self.encode_text_multi(input_ids, attention_mask)
-            q = q_dict["visual"]
-        else:
-            q = self.encode_text(input_ids, attention_mask)
+        q = self.encode_text(input_ids, attention_mask)
         h, g, event_mask, all_spans = self.encode_video_batch(features, feature_mask, return_spans=True)
 
-        q_norm = F.normalize(q, dim=-1) if self.normalize_embeddings else q
-        h_norm = F.normalize(h, dim=-1) if self.normalize_embeddings else h
-        g_norm = F.normalize(g, dim=-1) if self.normalize_embeddings else g
-
-        frame_scores = torch.einsum("bd,bnd->bn", q_norm, h_norm)
-        event_scores = torch.einsum("bd,bmd->bm", q_norm, g_norm)
-        frame_scores = frame_scores.masked_fill(~feature_mask.bool(), -1e4)
-        event_scores = event_scores.masked_fill(~event_mask.bool(), -1e4)
+        retrieval_scores = self.compute_retrieval_scores(
+            query_embedding=q,
+            frame_embeddings=h,
+            event_embeddings=g,
+            feature_mask=feature_mask,
+            event_mask=event_mask,
+        )
 
         out = {
             "query_embedding": q,
@@ -723,8 +813,7 @@ class EventFormerV1DynamicTSM(nn.Module):
             "event_embeddings": g,
             "event_spans": all_spans,
             "event_mask": event_mask,
-            "frame_scores": frame_scores,
-            "event_scores": event_scores,
+            **retrieval_scores,
         }
 
         if gt_start_idx is not None and gt_end_idx is not None:
@@ -756,13 +845,7 @@ class EventFormerV1DynamicTSM(nn.Module):
 
     @torch.inference_mode()
     def encode_query(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, normalize: Optional[bool] = None, modality: str = "visual"):
-        if self.use_modality_specific_query:
-            q_dict = self.encode_text_multi(input_ids, attention_mask)
-            if modality not in q_dict:
-                raise ValueError(f"Unknown modality '{modality}'. Available modalities: {list(q_dict.keys())}")
-            q = q_dict[modality]
-        else:
-            q = self.encode_text(input_ids, attention_mask)
+        q = self.encode_text(input_ids, attention_mask)
         if normalize is None:
             normalize = self.normalize_embeddings
         if normalize:

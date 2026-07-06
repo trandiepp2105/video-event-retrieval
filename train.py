@@ -10,7 +10,7 @@ def parse_args():
     parser.add_argument(
         "--config",
         type=str,
-        default="configs/train_config.json",
+        default="configs/train_retriever_large.json",
         help="Path to JSON config file.",
     )
     parser.add_argument("--train-manifest", type=str, default=None)

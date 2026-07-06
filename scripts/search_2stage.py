@@ -10,7 +10,6 @@ if str(ROOT) not in sys.path:
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from transformers import AutoTokenizer
 
 from eventformer_v1_dynamic_tsm.config import TrainConfig, resolve_text_model_source
@@ -131,20 +130,27 @@ def main():
     for row in rows:
         video_rows[row["video_id"]] = row
     video_ids = list(video_rows.keys())
-    video_embeddings = []
+    video_scores = []
     for video_id in video_ids:
         feat = np.load(resolve_feature_path(retr_cfg.feature_dir, video_rows[video_id]["feature_path"]), allow_pickle=True)["features"].astype("float32")
         feat = torch.from_numpy(feat[: retr_cfg.max_frames]).unsqueeze(0)
         mask = torch.ones(1, feat.shape[1], dtype=torch.bool)
         out = retriever.encode_video(feat, mask, normalize=True)
-        valid = out["event_mask"][0]
-        emb = out["event_embeddings"][0][valid].mean(dim=0)
-        video_embeddings.append(F.normalize(emb, dim=-1))
-    video_embeddings = torch.stack(video_embeddings)
+        video_scores.append(out)
 
     toks = tokenizer([args.query], padding=True, truncation=True, max_length=retr_cfg.tokenizer_max_length, return_tensors="pt")
     q = retriever.encode_query(toks["input_ids"], toks["attention_mask"], normalize=True)[0]
-    retrieval_scores = video_embeddings @ q
+    retrieval_scores = []
+    for video_out in video_scores:
+        scores = retriever.compute_retrieval_scores(
+            query_embedding=q.unsqueeze(0),
+            frame_embeddings=video_out["frame_embeddings"],
+            event_embeddings=video_out["event_embeddings"],
+            feature_mask=video_out["frame_mask"],
+            event_mask=video_out["event_mask"],
+        )
+        retrieval_scores.append(float(scores["video_scores"][0].item()))
+    retrieval_scores = torch.tensor(retrieval_scores, dtype=torch.float32)
     topk = min(args.top_k_videos, retrieval_scores.shape[0])
     top_video_indices = torch.topk(retrieval_scores, k=topk).indices.tolist()
 

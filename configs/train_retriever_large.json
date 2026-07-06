@@ -47,7 +47,7 @@
   "dropout": 0.1,
   "max_frames": 4096,
   "max_events": 1024,
-  "event_strategy": "window",
+  "event_strategy": "contrastive_convolution",
   "event_kmeans_num_events": 10,
   "event_window_size": 8,
   "event_stride": 8,
@@ -65,8 +65,8 @@
   "min_event_len": 3,
   "max_event_len": 30,
   "normalize_embeddings": true,
-  "lambda_frame": 0.8,
-  "lambda_event": 1.0,
+  "lambda_frame": 1.0,
+  "lambda_event": 0.8,
   "weak_positive_weight": 0.5,
   "use_hard_negative": true,
   "lambda_hard": 0.3,
@@ -85,8 +85,8 @@
   "shared_norm_num_negatives": 5,
   "segment_duration_sec": 1.5,
   "batch_size": 256,
-  "num_workers": 8,
-  "epochs": 13,
+  "num_workers": 32,
+  "epochs": 11,
   "lr": 0.0001,
   "weight_decay": 0.01,
   "max_grad_norm": 1.0,
@@ -98,5 +98,5 @@
   "seed": 42,
   "save_best_only": true,
   "best_metric_mode": "max",
-  "best_metric": "event_r5_iou_0_3"
+  "best_metric": "vr_r10"
 }

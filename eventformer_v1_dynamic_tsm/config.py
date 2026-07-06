@@ -54,7 +54,7 @@ class TrainConfig:
 
     max_frames: int = 2048
     max_events: int = 512
-    event_strategy: str = "window"
+    event_strategy: str = "contrastive_convolution"
     event_kmeans_num_events: int = 10
     event_window_size: int = 8
     event_stride: Optional[int] = None
@@ -66,8 +66,8 @@ class TrainConfig:
     min_event_len: int = 3
     max_event_len: int = 30
     normalize_embeddings: bool = True
-    lambda_frame: float = 0.8
-    lambda_event: float = 1.0
+    lambda_frame: float = 1.0
+    lambda_event: float = 0.8
     weak_positive_weight: float = 0.5
     use_hard_negative: bool = True
     lambda_hard: float = 1.0
@@ -104,7 +104,7 @@ class TrainConfig:
     tokenizer_max_length: int = 64
     seed: int = 42
     save_best_only: bool = False
-    best_metric: str = "event_r5_iou_0_3"
+    best_metric: str = "vr_r10"
     best_metric_mode: str = "max"
 
     @classmethod

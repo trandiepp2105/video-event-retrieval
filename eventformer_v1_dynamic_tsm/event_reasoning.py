@@ -185,6 +185,83 @@ class EventReasoner:
         spans = self._sanitize_spans(spans, n)
         return spans if spans else [(0, n - 1)]
 
+    def _compute_contrastive_boundary_scores(self, h_valid: torch.Tensor):
+        n = int(h_valid.shape[0])
+        if n <= 0:
+            return [], None
+
+        z = F.normalize(h_valid.detach().float(), dim=-1)
+        tsm = z @ z.t()
+        w = max(1, int(self.tsm_window_size))
+        candidate_ts: List[int] = []
+        candidate_scores = []
+
+        for t in range(self.min_event_len, n - self.min_event_len + 1):
+            l0, l1 = max(0, t - w), t
+            r0, r1 = t, min(n, t + w)
+            if l1 <= l0 or r1 <= r0:
+                continue
+
+            ll = self._mean_square_block(tsm, l0, l1, exclude_diag=True)
+            rr = self._mean_square_block(tsm, r0, r1, exclude_diag=True)
+            lr = tsm[l0:l1, r0:r1].mean()
+            rl = tsm[r0:r1, l0:l1].mean()
+            candidate_ts.append(t)
+            candidate_scores.append(ll + rr - lr - rl)
+
+        if not candidate_ts:
+            return [], None
+        return candidate_ts, torch.stack(candidate_scores)
+
+    def _build_contrastive_convolution_kernel(self, device: torch.device, dtype: torch.dtype):
+        w = max(1, int(self.tsm_window_size))
+        kernel_size = (2 * w) + 1
+        kernel = torch.zeros(kernel_size, kernel_size, dtype=dtype, device=device)
+
+        pos_mask = torch.zeros_like(kernel, dtype=torch.bool)
+        neg_mask = torch.zeros_like(kernel, dtype=torch.bool)
+
+        pos_mask[:w, :w] = True
+        pos_mask[w + 1 :, w + 1 :] = True
+        neg_mask[:w, w + 1 :] = True
+        neg_mask[w + 1 :, :w] = True
+
+        diag = torch.eye(kernel_size, dtype=torch.bool, device=device)
+        pos_mask = pos_mask & ~diag
+
+        pos_count = int(pos_mask.sum().item())
+        neg_count = int(neg_mask.sum().item())
+        if pos_count > 0:
+            kernel[pos_mask] = 1.0 / float(pos_count)
+        if neg_count > 0:
+            kernel[neg_mask] = -1.0 / float(neg_count)
+        return kernel.view(1, 1, kernel_size, kernel_size)
+
+    def _compute_contrastive_convolution_scores(self, h_valid: torch.Tensor):
+        n = int(h_valid.shape[0])
+        if n <= 0:
+            return [], None
+
+        z = F.normalize(h_valid.detach().float(), dim=-1)
+        tsm = z @ z.t()
+        kernel = self._build_contrastive_convolution_kernel(device=tsm.device, dtype=tsm.dtype)
+        padding = kernel.shape[-1] // 2
+        score_map = F.conv2d(
+            tsm.unsqueeze(0).unsqueeze(0),
+            kernel,
+            padding=padding,
+        ).squeeze(0).squeeze(0)
+
+        candidate_ts: List[int] = []
+        candidate_scores = []
+        for t in range(self.min_event_len, n - self.min_event_len):
+            candidate_ts.append(t)
+            candidate_scores.append(score_map[t, t])
+
+        if not candidate_ts:
+            return [], None
+        return candidate_ts, torch.stack(candidate_scores)
+
     def detect_window_spans(self, h_valid: torch.Tensor):
         n = int(h_valid.shape[0])
         return build_window_events(valid_len=n, window_size=int(self.window_size), stride=self.stride)
@@ -206,29 +283,11 @@ class EventReasoner:
             if n <= self.min_event_len * 2:
                 return [(0, n - 1)]
 
-            z = F.normalize(h_valid.detach().float(), dim=-1)
-            tsm = z @ z.t()
-            w = int(self.tsm_window_size)
-            candidate_ts = []
-            candidate_scores = []
-
-            for t in range(self.min_event_len, n - self.min_event_len + 1):
-                l0, l1 = max(0, t - w), t
-                r0, r1 = t, min(n, t + w)
-                if l1 <= l0 or r1 <= r0:
-                    continue
-                ll = self._mean_square_block(tsm, l0, l1, exclude_diag=True)
-                rr = self._mean_square_block(tsm, r0, r1, exclude_diag=True)
-                lr = tsm[l0:l1, r0:r1].mean()
-                rl = tsm[r0:r1, l0:l1].mean()
-                score = ll + rr - lr - rl
-                candidate_ts.append(t)
-                candidate_scores.append(score)
+            candidate_ts, scores = self._compute_contrastive_boundary_scores(h_valid)
 
             if not candidate_ts:
                 boundaries = []
             else:
-                scores = torch.stack(candidate_scores)
                 threshold = scores.mean() + self.tsm_threshold_alpha * scores.std(unbiased=False)
                 boundaries_with_scores = []
                 for i, t in enumerate(candidate_ts):
@@ -273,29 +332,10 @@ class EventReasoner:
             if n <= self.min_event_len * 2:
                 return [(0, n - 1)]
 
-            z = F.normalize(h_valid.detach().float(), dim=-1)
-            tsm = z @ z.t()
-            w = max(1, int(self.tsm_window_size))
-            candidate_ts = []
-            candidate_scores = []
-
-            for t in range(self.min_event_len, n - self.min_event_len + 1):
-                l0, l1 = max(0, t - w), t
-                r0, r1 = t, min(n, t + w)
-                if l1 <= l0 or r1 <= r0:
-                    continue
-
-                ll = self._mean_square_block(tsm, l0, l1, exclude_diag=True)
-                rr = self._mean_square_block(tsm, r0, r1, exclude_diag=True)
-                lr = tsm[l0:l1, r0:r1].mean()
-                score = ll + rr - (2.0 * lr)
-                candidate_ts.append(t)
-                candidate_scores.append(score)
-
-            if not candidate_ts:
+            candidate_ts, scores = self._compute_contrastive_convolution_scores(h_valid)
+            if not candidate_ts or scores is None:
                 return [(0, n - 1)]
 
-            scores = torch.stack(candidate_scores)
             threshold = scores.mean() + self.tsm_threshold_alpha * scores.std(unbiased=False)
             boundaries = []
             for i, t in enumerate(candidate_ts):

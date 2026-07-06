@@ -14,51 +14,7 @@ from transformers import AutoTokenizer
 from .config import TrainConfig, resolve_text_model_source
 from .data import BatchCollator, FeatureManifestDataset
 from .io_utils import JsonlReader, save_json, set_seed
-from .metrics import span_iou
 from .model import EventFormerV1DynamicTSM
-
-
-def frame_topk_inside_gt(frame_scores: torch.Tensor, gt_start: int, gt_end: int, k: int) -> bool:
-    k = min(k, int(frame_scores.numel()))
-    if k <= 0:
-        return False
-    top_idx = torch.topk(frame_scores, k=k).indices.tolist()
-    return any(int(gt_start) <= idx <= int(gt_end) for idx in top_idx)
-
-
-def event_topk_iou(
-    event_scores: torch.Tensor,
-    event_spans: list[tuple[int, int]],
-    gt_start: int,
-    gt_end: int,
-    k: int,
-    threshold: float,
-) -> bool:
-    if len(event_spans) == 0:
-        return False
-    k = min(k, int(event_scores.numel()), len(event_spans))
-    if k <= 0:
-        return False
-    top_idx = torch.topk(event_scores[: len(event_spans)], k=k).indices.tolist()
-    gt = (int(gt_start), int(gt_end))
-    return any(span_iou(event_spans[idx], gt) >= threshold for idx in top_idx)
-
-
-def event_topk_contains_gt_frame(
-    event_scores: torch.Tensor,
-    event_spans: list[tuple[int, int]],
-    gt_start: int,
-    gt_end: int,
-    k: int,
-) -> bool:
-    if len(event_spans) == 0:
-        return False
-    k = min(k, int(event_scores.numel()), len(event_spans))
-    if k <= 0:
-        return False
-    center = (int(gt_start) + int(gt_end)) // 2
-    top_idx = torch.topk(event_scores[: len(event_spans)], k=k).indices.tolist()
-    return any(event_spans[idx][0] <= center <= event_spans[idx][1] for idx in top_idx)
 
 
 class EventFormerTrainer:
@@ -232,6 +188,93 @@ class EventFormerTrainer:
             total += float(out["loss"].item())
         return total / max(1, len(loader))
 
+    def _load_video_features(self, dataset: FeatureManifestDataset, feature_path: str) -> torch.Tensor:
+        resolved = dataset._resolve_feature_path(feature_path)
+        data = np.load(resolved, allow_pickle=True)
+        features = data["features"].astype("float32")
+        if self.cfg.max_frames is not None:
+            features = features[: self.cfg.max_frames]
+        return torch.from_numpy(features)
+
+    def _build_retrieval_corpus(self, dataset: FeatureManifestDataset):
+        assert self.model is not None
+
+        unique_rows = {}
+        for row in dataset.rows:
+            video_id = row["video_id"]
+            if video_id not in unique_rows:
+                unique_rows[video_id] = row
+
+        video_ids = list(unique_rows.keys())
+        if not video_ids:
+            return {
+                "video_ids": [],
+                "video_id_to_index": {},
+                "event_embeddings": torch.empty(0, self.model.d_model),
+                "event_video_indices": torch.empty(0, dtype=torch.long),
+                "event_count_mean": 0.0,
+            }
+
+        flat_event_embeddings = []
+        flat_event_video_indices = []
+        event_counts = []
+        encode_batch_size = max(1, min(self.cfg.batch_size, 32))
+
+        for start in tqdm(range(0, len(video_ids), encode_batch_size), desc="build_vr_corpus"):
+            batch_video_ids = video_ids[start : start + encode_batch_size]
+            feature_list = [self._load_video_features(dataset, unique_rows[video_id]["feature_path"]) for video_id in batch_video_ids]
+            max_len = max(int(feat.shape[0]) for feat in feature_list)
+            d_raw = int(feature_list[0].shape[1])
+
+            features = torch.zeros(len(feature_list), max_len, d_raw, dtype=torch.float32)
+            feature_mask = torch.zeros(len(feature_list), max_len, dtype=torch.bool)
+            for idx, feat in enumerate(feature_list):
+                cur_len = int(feat.shape[0])
+                if cur_len <= 0:
+                    continue
+                features[idx, :cur_len] = feat
+                feature_mask[idx, :cur_len] = True
+
+            encoded = self.model.encode_video(
+                features=features.to(self.device, non_blocking=True),
+                feature_mask=feature_mask.to(self.device, non_blocking=True),
+                normalize=True,
+            )
+            event_embeddings = encoded["event_embeddings"].detach().cpu()
+            event_mask = encoded["event_mask"].detach().cpu()
+            frame_embeddings = encoded["frame_embeddings"].detach().cpu()
+            frame_mask = encoded["frame_mask"].detach().cpu()
+
+            for local_idx, _video_id in enumerate(batch_video_ids):
+                valid_events = event_mask[local_idx].bool()
+                cur_embeddings = event_embeddings[local_idx, valid_events]
+                if cur_embeddings.shape[0] == 0:
+                    valid_frames = frame_mask[local_idx].bool()
+                    cur_embeddings = frame_embeddings[local_idx, valid_frames]
+                event_counts.append(int(cur_embeddings.shape[0]))
+                if cur_embeddings.shape[0] == 0:
+                    continue
+                global_video_idx = start + local_idx
+                flat_event_embeddings.append(cur_embeddings)
+                flat_event_video_indices.append(
+                    torch.full((cur_embeddings.shape[0],), global_video_idx, dtype=torch.long)
+                )
+
+        if flat_event_embeddings:
+            event_embeddings = torch.cat(flat_event_embeddings, dim=0)
+            event_video_indices = torch.cat(flat_event_video_indices, dim=0)
+        else:
+            event_embeddings = torch.empty(0, self.model.d_model)
+            event_video_indices = torch.empty(0, dtype=torch.long)
+
+        return {
+            "video_ids": video_ids,
+            "video_id_to_index": {video_id: idx for idx, video_id in enumerate(video_ids)},
+            "event_embeddings": event_embeddings,
+            "event_video_indices": event_video_indices,
+            "event_count_mean": (sum(event_counts) / len(event_counts)) if event_counts else 0.0,
+        }
+
     @torch.inference_mode()
     def evaluate_retrieval(self, loader):
         if loader is None:
@@ -239,108 +282,74 @@ class EventFormerTrainer:
         assert self.model is not None
         self.model.eval()
 
+        dataset = getattr(loader, "dataset", None)
+        if dataset is None or not hasattr(dataset, "rows"):
+            return {}
+
+        corpus = self._build_retrieval_corpus(dataset)
+        num_videos = len(corpus["video_ids"])
+        if num_videos == 0 or corpus["event_embeddings"].numel() == 0:
+            return {}
+
         total = 0
-        frame_r1 = 0
-        frame_r5 = 0
-        frame_r10 = 0
-        event_r1_contains = 0
-        event_r5_contains = 0
-        event_r10_contains = 0
-        event_r1_iou03 = 0
-        event_r5_iou03 = 0
-        event_r10_iou03 = 0
-        event_r1_iou05 = 0
-        event_r5_iou05 = 0
-        event_r10_iou05 = 0
-        top1_iou_sum = 0.0
-        num_events_all = []
+        recall_hits = {1: 0, 5: 0, 10: 0, 100: 0}
+        rank_sum = 0.0
+        event_embeddings = corpus["event_embeddings"]
+        event_video_indices = corpus["event_video_indices"]
+        score_chunk_size = 16384
 
-        for batch in tqdm(loader, desc="val_retrieval"):
-            batch = self._move_batch(batch)
+        for batch in tqdm(loader, desc="val_vr"):
+            input_ids = batch["input_ids"].to(self.device, non_blocking=True)
+            attention_mask = batch["attention_mask"].to(self.device, non_blocking=True)
             q = self.model.encode_query(
-                input_ids=batch["input_ids"],
-                attention_mask=batch["attention_mask"],
+                input_ids=input_ids,
+                attention_mask=attention_mask,
                 normalize=True,
             )
-            video_out = self.model.encode_video(
-                features=batch["features"],
-                feature_mask=batch["feature_mask"],
-                normalize=True,
+            batch_size = int(q.shape[0])
+            total += batch_size
+
+            neg_inf = torch.finfo(q.dtype).min
+            retrieval_scores = q.new_full((batch_size, num_videos), neg_inf)
+            for start in range(0, event_embeddings.shape[0], score_chunk_size):
+                end = min(start + score_chunk_size, event_embeddings.shape[0])
+                emb_chunk = event_embeddings[start:end].to(self.device, non_blocking=True)
+                score_chunk = q @ emb_chunk.t()
+                video_idx_chunk = event_video_indices[start:end].to(self.device, non_blocking=True)
+                scatter_index = video_idx_chunk.unsqueeze(0).expand(batch_size, -1)
+                if hasattr(retrieval_scores, "scatter_reduce_"):
+                    retrieval_scores.scatter_reduce_(1, scatter_index, score_chunk, reduce="amax", include_self=True)
+                else:
+                    for local_video_idx in torch.unique(video_idx_chunk).tolist():
+                        mask = video_idx_chunk == local_video_idx
+                        retrieval_scores[:, local_video_idx] = torch.maximum(
+                            retrieval_scores[:, local_video_idx],
+                            score_chunk[:, mask].max(dim=1).values,
+                        )
+
+            target_video_indices = torch.tensor(
+                [corpus["video_id_to_index"][video_id] for video_id in batch["video_ids"]],
+                dtype=torch.long,
+                device=self.device,
             )
-            h = video_out["frame_embeddings"]
-            g = video_out["event_embeddings"]
-            event_mask = video_out["event_mask"]
-            event_spans = video_out["event_spans"]
-            feature_mask = batch["feature_mask"]
-            gt_start = batch["gt_start_idx"]
-            gt_end = batch["gt_end_idx"]
+            sorted_video_indices = torch.argsort(retrieval_scores, dim=1, descending=True)
+            matches = sorted_video_indices.eq(target_video_indices.unsqueeze(1))
+            target_ranks = matches.float().argmax(dim=1) + 1
+            rank_sum += float(target_ranks.sum().item())
 
-            batch_size = q.shape[0]
-            for b in range(batch_size):
-                total += 1
-                s = int(gt_start[b].item())
-                e = int(gt_end[b].item())
-
-                frame_scores = h[b] @ q[b]
-                frame_scores = frame_scores.masked_fill(~feature_mask[b].bool(), float("-inf"))
-                if frame_topk_inside_gt(frame_scores, s, e, 1):
-                    frame_r1 += 1
-                if frame_topk_inside_gt(frame_scores, s, e, 5):
-                    frame_r5 += 1
-                if frame_topk_inside_gt(frame_scores, s, e, 10):
-                    frame_r10 += 1
-
-                event_scores = g[b] @ q[b]
-                event_scores = event_scores.masked_fill(~event_mask[b].bool(), float("-inf"))
-                num_events = int(event_mask[b].sum().item())
-                num_events_all.append(num_events)
-                if num_events <= 0:
-                    continue
-
-                top_event_idx = torch.topk(event_scores[:num_events], k=min(1, num_events)).indices.tolist()
-                gt_span = (s, e)
-                top1_iou = span_iou(event_spans[b][top_event_idx[0]], gt_span) if top_event_idx else 0.0
-                top1_iou_sum += top1_iou
-                if event_topk_contains_gt_frame(event_scores, event_spans[b], s, e, 1):
-                    event_r1_contains += 1
-                if event_topk_contains_gt_frame(event_scores, event_spans[b], s, e, 5):
-                    event_r5_contains += 1
-                if event_topk_contains_gt_frame(event_scores, event_spans[b], s, e, 10):
-                    event_r10_contains += 1
-                if event_topk_iou(event_scores, event_spans[b], s, e, 1, 0.3):
-                    event_r1_iou03 += 1
-                if event_topk_iou(event_scores, event_spans[b], s, e, 5, 0.3):
-                    event_r5_iou03 += 1
-                if event_topk_iou(event_scores, event_spans[b], s, e, 10, 0.3):
-                    event_r10_iou03 += 1
-                if event_topk_iou(event_scores, event_spans[b], s, e, 1, 0.5):
-                    event_r1_iou05 += 1
-                if event_topk_iou(event_scores, event_spans[b], s, e, 5, 0.5):
-                    event_r5_iou05 += 1
-                if event_topk_iou(event_scores, event_spans[b], s, e, 10, 0.5):
-                    event_r10_iou05 += 1
+            for k in recall_hits:
+                topk = min(k, num_videos)
+                recall_hits[k] += int(matches[:, :topk].any(dim=1).sum().item())
 
         denom = max(total, 1)
-        num_events_min = min(num_events_all) if num_events_all else 0
-        num_events_mean = (sum(num_events_all) / len(num_events_all)) if num_events_all else 0.0
-        num_events_max = max(num_events_all) if num_events_all else 0
         return {
-            "frame_r1_inside_gt": frame_r1 / denom,
-            "frame_r5_inside_gt": frame_r5 / denom,
-            "frame_r10_inside_gt": frame_r10 / denom,
-            "event_r1_contains_gt_frame": event_r1_contains / denom,
-            "event_r5_contains_gt_frame": event_r5_contains / denom,
-            "event_r10_contains_gt_frame": event_r10_contains / denom,
-            "event_r1_iou_0_3": event_r1_iou03 / denom,
-            "event_r5_iou_0_3": event_r5_iou03 / denom,
-            "event_r10_iou_0_3": event_r10_iou03 / denom,
-            "event_r1_iou_0_5": event_r1_iou05 / denom,
-            "event_r5_iou_0_5": event_r5_iou05 / denom,
-            "event_r10_iou_0_5": event_r10_iou05 / denom,
-            "mean_top1_event_iou": top1_iou_sum / denom,
-            "num_events_min": num_events_min,
-            "num_events_mean": num_events_mean,
-            "num_events_max": num_events_max,
+            "vr_r1": recall_hits[1] / denom,
+            "vr_r5": recall_hits[5] / denom,
+            "vr_r10": recall_hits[10] / denom,
+            "vr_r100": recall_hits[100] / denom,
+            "vr_mean_rank": rank_sum / denom,
+            "vr_num_videos": num_videos,
+            "vr_mean_events_per_video": corpus["event_count_mean"],
         }
 
     def save_checkpoint(self, name: str, epoch: int, val_loss: Optional[float]):
