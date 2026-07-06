@@ -8,6 +8,10 @@
   "text_model_path": "/kaggle/input/models/tranvandiep21052003/roberta-large/transformers/default/1/roberta-large-hf",
   "freeze_text_encoder": true,
   "query_pooling": "attention",
+  "query_transformer_layers": 1,
+  "query_transformer_heads": 8,
+  "query_transformer_ff_dim": 4096,
+  "query_transformer_dropout": 0.1,
   "use_modality_specific_query": false,
   "modalities": [
     "visual"

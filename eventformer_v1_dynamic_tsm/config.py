@@ -36,6 +36,10 @@ class TrainConfig:
     text_model_path: Optional[str] = None
     freeze_text_encoder: bool = True
     query_pooling: str = "attention"
+    query_transformer_layers: int = 1
+    query_transformer_heads: Optional[int] = None
+    query_transformer_ff_dim: Optional[int] = None
+    query_transformer_dropout: Optional[float] = None
     use_modality_specific_query: bool = False
     modalities: Tuple[str, ...] = ("visual",)
 

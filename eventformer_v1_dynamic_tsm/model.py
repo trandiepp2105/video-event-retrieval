@@ -196,6 +196,10 @@ class EventFormerV1DynamicTSM(nn.Module):
         text_model_path: Optional[str] = None,
         freeze_text_encoder: bool = True,
         query_pooling: str = "attention",
+        query_transformer_layers: int = 1,
+        query_transformer_heads: Optional[int] = None,
+        query_transformer_ff_dim: Optional[int] = None,
+        query_transformer_dropout: Optional[float] = None,
         use_modality_specific_query: bool = False,
         modalities: Tuple[str, ...] = ("visual",),
         max_frames: int = 2048,
@@ -242,6 +246,10 @@ class EventFormerV1DynamicTSM(nn.Module):
             text_model_path=text_model_path,
             freeze_text_encoder=freeze_text_encoder,
             query_pooling=query_pooling,
+            query_transformer_layers=query_transformer_layers,
+            query_transformer_heads=query_transformer_heads,
+            query_transformer_ff_dim=query_transformer_ff_dim,
+            query_transformer_dropout=query_transformer_dropout,
             use_modality_specific_query=use_modality_specific_query,
             modalities=list(modalities),
             max_frames=max_frames,
@@ -298,6 +306,7 @@ class EventFormerV1DynamicTSM(nn.Module):
         self.event_pooling = event_pooling
         self.freeze_text_encoder = freeze_text_encoder
         self.query_pooling = query_pooling
+        self.query_transformer_layers = max(0, int(query_transformer_layers))
         self.use_modality_specific_query = use_modality_specific_query
         self.modalities = tuple(modalities)
         if self.use_modality_specific_query and "visual" not in self.modalities:
@@ -337,6 +346,31 @@ class EventFormerV1DynamicTSM(nn.Module):
         )
         self.text_hidden_size = int(self.text_encoder.config.hidden_size)
         text_dim = self.text_hidden_size
+        self.query_transformer_heads = int(query_transformer_heads or num_heads)
+        if text_dim % self.query_transformer_heads != 0:
+            raise ValueError(
+                "text hidden size must be divisible by query_transformer_heads, "
+                f"got hidden_size={text_dim}, query_transformer_heads={self.query_transformer_heads}"
+            )
+        self.query_transformer_ff_dim = int(query_transformer_ff_dim or text_dim * 4)
+        self.query_transformer_dropout = float(dropout if query_transformer_dropout is None else query_transformer_dropout)
+        if self.query_transformer_layers > 0:
+            query_layer = nn.TransformerEncoderLayer(
+                d_model=text_dim,
+                nhead=self.query_transformer_heads,
+                dim_feedforward=self.query_transformer_ff_dim,
+                dropout=self.query_transformer_dropout,
+                activation="gelu",
+                batch_first=True,
+                norm_first=True,
+            )
+            self.query_transformer = nn.TransformerEncoder(
+                query_layer,
+                num_layers=self.query_transformer_layers,
+                norm=nn.LayerNorm(text_dim),
+            )
+        else:
+            self.query_transformer = nn.Identity()
         self.query_projection = nn.Linear(text_dim, d_model)
         self.query_attn_pool = nn.Sequential(
             nn.Linear(text_dim, text_dim),
@@ -383,25 +417,29 @@ class EventFormerV1DynamicTSM(nn.Module):
 
         raise ValueError(f"Unknown query_pooling: {self.query_pooling}")
 
-    def encode_text(self, input_ids: torch.Tensor, attention_mask: torch.Tensor):
+    def _encode_query_tokens(self, input_ids: torch.Tensor, attention_mask: torch.Tensor):
         if self.freeze_text_encoder:
             with torch.no_grad():
                 out = self.text_encoder(input_ids=input_ids, attention_mask=attention_mask)
         else:
             out = self.text_encoder(input_ids=input_ids, attention_mask=attention_mask)
         token_emb = out.last_hidden_state
+        if self.query_transformer_layers > 0:
+            token_emb = self.query_transformer(
+                token_emb,
+                src_key_padding_mask=~attention_mask.bool(),
+            )
+            token_emb = token_emb * attention_mask.unsqueeze(-1).to(token_emb.dtype)
+        return token_emb
+
+    def encode_text(self, input_ids: torch.Tensor, attention_mask: torch.Tensor):
+        token_emb = self._encode_query_tokens(input_ids=input_ids, attention_mask=attention_mask)
         pooled = self._pool_query_tokens(token_emb, attention_mask)
         q = self.query_projection(pooled)
         return q
 
     def encode_text_multi(self, input_ids: torch.Tensor, attention_mask: torch.Tensor):
-        if self.freeze_text_encoder:
-            with torch.no_grad():
-                out = self.text_encoder(input_ids=input_ids, attention_mask=attention_mask)
-        else:
-            out = self.text_encoder(input_ids=input_ids, attention_mask=attention_mask)
-
-        token_emb = out.last_hidden_state
+        token_emb = self._encode_query_tokens(input_ids=input_ids, attention_mask=attention_mask)
         mask = attention_mask.bool()
         query_dict = {}
         for m in self.modalities:

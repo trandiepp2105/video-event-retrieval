@@ -31,6 +31,10 @@ def parse_args():
     parser.add_argument("--max-events", type=int, default=None)
     parser.add_argument("--frame-layers", type=int, default=None)
     parser.add_argument("--event-layers", type=int, default=None)
+    parser.add_argument("--query-transformer-layers", type=int, default=None)
+    parser.add_argument("--query-transformer-heads", type=int, default=None)
+    parser.add_argument("--query-transformer-ff-dim", type=int, default=None)
+    parser.add_argument("--query-transformer-dropout", type=float, default=None)
     parser.add_argument("--num-heads", type=int, default=None)
     parser.add_argument("--ff-dim", type=int, default=None)
     parser.add_argument("--query-pooling", type=str, default=None)
@@ -97,6 +101,10 @@ def build_config(args) -> TrainConfig:
         "max_events",
         "frame_layers",
         "event_layers",
+        "query_transformer_layers",
+        "query_transformer_heads",
+        "query_transformer_ff_dim",
+        "query_transformer_dropout",
         "num_heads",
         "ff_dim",
         "query_pooling",
