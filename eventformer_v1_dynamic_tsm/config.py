@@ -35,6 +35,7 @@ class TrainConfig:
     text_model_name: str = "roberta-base"
     text_model_path: Optional[str] = None
     freeze_text_encoder: bool = True
+    text_encoder_lr: Optional[float] = None
     query_pooling: str = "attention"
     query_transformer_layers: int = 1
     query_transformer_heads: Optional[int] = None

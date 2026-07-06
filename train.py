@@ -26,6 +26,7 @@ def parse_args():
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--text-model-name", type=str, default=None)
     parser.add_argument("--text-model-path", type=str, default=None)
+    parser.add_argument("--text-encoder-lr", type=float, default=None)
     parser.add_argument("--d-model", type=int, default=None)
     parser.add_argument("--max-frames", type=int, default=None)
     parser.add_argument("--max-events", type=int, default=None)
@@ -96,6 +97,7 @@ def build_config(args) -> TrainConfig:
         "device",
         "text_model_name",
         "text_model_path",
+        "text_encoder_lr",
         "d_model",
         "max_frames",
         "max_events",

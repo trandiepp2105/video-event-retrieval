@@ -210,13 +210,19 @@ class EventFormerTrainer:
             return {
                 "video_ids": [],
                 "video_id_to_index": {},
+                "frame_embeddings": torch.empty(0, self.model.d_model),
+                "frame_video_indices": torch.empty(0, dtype=torch.long),
                 "event_embeddings": torch.empty(0, self.model.d_model),
                 "event_video_indices": torch.empty(0, dtype=torch.long),
+                "frame_count_mean": 0.0,
                 "event_count_mean": 0.0,
             }
 
+        flat_frame_embeddings = []
+        flat_frame_video_indices = []
         flat_event_embeddings = []
         flat_event_video_indices = []
+        frame_counts = []
         event_counts = []
         encode_batch_size = max(1, min(self.cfg.batch_size, 32))
 
@@ -246,11 +252,20 @@ class EventFormerTrainer:
             frame_mask = encoded["frame_mask"].detach().cpu()
 
             for local_idx, _video_id in enumerate(batch_video_ids):
+                valid_frames = frame_mask[local_idx].bool()
+                cur_frame_embeddings = frame_embeddings[local_idx, valid_frames]
+                frame_counts.append(int(cur_frame_embeddings.shape[0]))
+                if cur_frame_embeddings.shape[0] > 0:
+                    global_video_idx = start + local_idx
+                    flat_frame_embeddings.append(cur_frame_embeddings)
+                    flat_frame_video_indices.append(
+                        torch.full((cur_frame_embeddings.shape[0],), global_video_idx, dtype=torch.long)
+                    )
+
                 valid_events = event_mask[local_idx].bool()
                 cur_embeddings = event_embeddings[local_idx, valid_events]
                 if cur_embeddings.shape[0] == 0:
-                    valid_frames = frame_mask[local_idx].bool()
-                    cur_embeddings = frame_embeddings[local_idx, valid_frames]
+                    cur_embeddings = cur_frame_embeddings
                 event_counts.append(int(cur_embeddings.shape[0]))
                 if cur_embeddings.shape[0] == 0:
                     continue
@@ -259,6 +274,13 @@ class EventFormerTrainer:
                 flat_event_video_indices.append(
                     torch.full((cur_embeddings.shape[0],), global_video_idx, dtype=torch.long)
                 )
+
+        if flat_frame_embeddings:
+            frame_embeddings = torch.cat(flat_frame_embeddings, dim=0)
+            frame_video_indices = torch.cat(flat_frame_video_indices, dim=0)
+        else:
+            frame_embeddings = torch.empty(0, self.model.d_model)
+            frame_video_indices = torch.empty(0, dtype=torch.long)
 
         if flat_event_embeddings:
             event_embeddings = torch.cat(flat_event_embeddings, dim=0)
@@ -270,8 +292,11 @@ class EventFormerTrainer:
         return {
             "video_ids": video_ids,
             "video_id_to_index": {video_id: idx for idx, video_id in enumerate(video_ids)},
+            "frame_embeddings": frame_embeddings,
+            "frame_video_indices": frame_video_indices,
             "event_embeddings": event_embeddings,
             "event_video_indices": event_video_indices,
+            "frame_count_mean": (sum(frame_counts) / len(frame_counts)) if frame_counts else 0.0,
             "event_count_mean": (sum(event_counts) / len(event_counts)) if event_counts else 0.0,
         }
 
@@ -288,12 +313,18 @@ class EventFormerTrainer:
 
         corpus = self._build_retrieval_corpus(dataset)
         num_videos = len(corpus["video_ids"])
-        if num_videos == 0 or corpus["event_embeddings"].numel() == 0:
+        if num_videos == 0:
             return {}
 
         total = 0
-        recall_hits = {1: 0, 5: 0, 10: 0, 100: 0}
-        rank_sum = 0.0
+        recall_hits_frame = {1: 0, 5: 0, 10: 0, 100: 0}
+        recall_hits_event = {1: 0, 5: 0, 10: 0, 100: 0}
+        recall_hits_combined = {1: 0, 5: 0, 10: 0, 100: 0}
+        rank_sum_frame = 0.0
+        rank_sum_event = 0.0
+        rank_sum_combined = 0.0
+        frame_embeddings = corpus["frame_embeddings"]
+        frame_video_indices = corpus["frame_video_indices"]
         event_embeddings = corpus["event_embeddings"]
         event_video_indices = corpus["event_video_indices"]
         score_chunk_size = 16384
@@ -309,46 +340,90 @@ class EventFormerTrainer:
             batch_size = int(q.shape[0])
             total += batch_size
 
-            neg_inf = torch.finfo(q.dtype).min
-            retrieval_scores = q.new_full((batch_size, num_videos), neg_inf)
-            for start in range(0, event_embeddings.shape[0], score_chunk_size):
-                end = min(start + score_chunk_size, event_embeddings.shape[0])
-                emb_chunk = event_embeddings[start:end].to(self.device, non_blocking=True)
-                score_chunk = q @ emb_chunk.t()
-                video_idx_chunk = event_video_indices[start:end].to(self.device, non_blocking=True)
-                scatter_index = video_idx_chunk.unsqueeze(0).expand(batch_size, -1)
-                if hasattr(retrieval_scores, "scatter_reduce_"):
-                    retrieval_scores.scatter_reduce_(1, scatter_index, score_chunk, reduce="amax", include_self=True)
-                else:
-                    for local_video_idx in torch.unique(video_idx_chunk).tolist():
-                        mask = video_idx_chunk == local_video_idx
-                        retrieval_scores[:, local_video_idx] = torch.maximum(
-                            retrieval_scores[:, local_video_idx],
-                            score_chunk[:, mask].max(dim=1).values,
-                        )
+            neg_inf = -1e4
+            frame_retrieval_scores = q.new_full((batch_size, num_videos), neg_inf)
+            event_retrieval_scores = q.new_full((batch_size, num_videos), neg_inf)
+
+            if frame_embeddings.numel() > 0:
+                for start in range(0, frame_embeddings.shape[0], score_chunk_size):
+                    end = min(start + score_chunk_size, frame_embeddings.shape[0])
+                    emb_chunk = frame_embeddings[start:end].to(self.device, non_blocking=True)
+                    score_chunk = q @ emb_chunk.t()
+                    video_idx_chunk = frame_video_indices[start:end].to(self.device, non_blocking=True)
+                    scatter_index = video_idx_chunk.unsqueeze(0).expand(batch_size, -1)
+                    if hasattr(frame_retrieval_scores, "scatter_reduce_"):
+                        frame_retrieval_scores.scatter_reduce_(1, scatter_index, score_chunk, reduce="amax", include_self=True)
+                    else:
+                        for local_video_idx in torch.unique(video_idx_chunk).tolist():
+                            mask = video_idx_chunk == local_video_idx
+                            frame_retrieval_scores[:, local_video_idx] = torch.maximum(
+                                frame_retrieval_scores[:, local_video_idx],
+                                score_chunk[:, mask].max(dim=1).values,
+                            )
+
+            if event_embeddings.numel() > 0:
+                for start in range(0, event_embeddings.shape[0], score_chunk_size):
+                    end = min(start + score_chunk_size, event_embeddings.shape[0])
+                    emb_chunk = event_embeddings[start:end].to(self.device, non_blocking=True)
+                    score_chunk = q @ emb_chunk.t()
+                    video_idx_chunk = event_video_indices[start:end].to(self.device, non_blocking=True)
+                    scatter_index = video_idx_chunk.unsqueeze(0).expand(batch_size, -1)
+                    if hasattr(event_retrieval_scores, "scatter_reduce_"):
+                        event_retrieval_scores.scatter_reduce_(1, scatter_index, score_chunk, reduce="amax", include_self=True)
+                    else:
+                        for local_video_idx in torch.unique(video_idx_chunk).tolist():
+                            mask = video_idx_chunk == local_video_idx
+                            event_retrieval_scores[:, local_video_idx] = torch.maximum(
+                                event_retrieval_scores[:, local_video_idx],
+                                score_chunk[:, mask].max(dim=1).values,
+                            )
+
+            combined_retrieval_scores = torch.maximum(frame_retrieval_scores, event_retrieval_scores)
 
             target_video_indices = torch.tensor(
                 [corpus["video_id_to_index"][video_id] for video_id in batch["video_ids"]],
                 dtype=torch.long,
                 device=self.device,
             )
-            sorted_video_indices = torch.argsort(retrieval_scores, dim=1, descending=True)
-            matches = sorted_video_indices.eq(target_video_indices.unsqueeze(1))
-            target_ranks = matches.float().argmax(dim=1) + 1
-            rank_sum += float(target_ranks.sum().item())
+            score_sets = (
+                ("frame", frame_retrieval_scores, recall_hits_frame),
+                ("event", event_retrieval_scores, recall_hits_event),
+                ("combined", combined_retrieval_scores, recall_hits_combined),
+            )
+            for name, retrieval_scores, recall_hits in score_sets:
+                sorted_video_indices = torch.argsort(retrieval_scores, dim=1, descending=True)
+                matches = sorted_video_indices.eq(target_video_indices.unsqueeze(1))
+                target_ranks = matches.float().argmax(dim=1) + 1
+                if name == "frame":
+                    rank_sum_frame += float(target_ranks.sum().item())
+                elif name == "event":
+                    rank_sum_event += float(target_ranks.sum().item())
+                else:
+                    rank_sum_combined += float(target_ranks.sum().item())
 
-            for k in recall_hits:
-                topk = min(k, num_videos)
-                recall_hits[k] += int(matches[:, :topk].any(dim=1).sum().item())
+                for k in recall_hits:
+                    topk = min(k, num_videos)
+                    recall_hits[k] += int(matches[:, :topk].any(dim=1).sum().item())
 
         denom = max(total, 1)
         return {
-            "vr_r1": recall_hits[1] / denom,
-            "vr_r5": recall_hits[5] / denom,
-            "vr_r10": recall_hits[10] / denom,
-            "vr_r100": recall_hits[100] / denom,
-            "vr_mean_rank": rank_sum / denom,
+            "vr_frame_r1": recall_hits_frame[1] / denom,
+            "vr_frame_r5": recall_hits_frame[5] / denom,
+            "vr_frame_r10": recall_hits_frame[10] / denom,
+            "vr_frame_r100": recall_hits_frame[100] / denom,
+            "vr_frame_mean_rank": rank_sum_frame / denom,
+            "vr_event_r1": recall_hits_event[1] / denom,
+            "vr_event_r5": recall_hits_event[5] / denom,
+            "vr_event_r10": recall_hits_event[10] / denom,
+            "vr_event_r100": recall_hits_event[100] / denom,
+            "vr_event_mean_rank": rank_sum_event / denom,
+            "vr_r1": recall_hits_combined[1] / denom,
+            "vr_r5": recall_hits_combined[5] / denom,
+            "vr_r10": recall_hits_combined[10] / denom,
+            "vr_r100": recall_hits_combined[100] / denom,
+            "vr_mean_rank": rank_sum_combined / denom,
             "vr_num_videos": num_videos,
+            "vr_mean_frames_per_video": corpus["frame_count_mean"],
             "vr_mean_events_per_video": corpus["event_count_mean"],
         }
 
@@ -369,11 +444,34 @@ class EventFormerTrainer:
         train_loader, val_loader = self.build_dataloaders()
         self.build_model()
         assert self.model is not None
-        optimizer = torch.optim.AdamW(
-            self.model.parameters(),
-            lr=self.cfg.lr,
-            weight_decay=self.cfg.weight_decay,
-        )
+        text_encoder_params = []
+        other_params = []
+        for name, param in self.model.named_parameters():
+            if not param.requires_grad:
+                continue
+            if name.startswith("text_encoder."):
+                text_encoder_params.append(param)
+            else:
+                other_params.append(param)
+
+        optimizer_groups = []
+        if other_params:
+            optimizer_groups.append(
+                {
+                    "params": other_params,
+                    "lr": self.cfg.lr,
+                    "weight_decay": self.cfg.weight_decay,
+                }
+            )
+        if text_encoder_params:
+            optimizer_groups.append(
+                {
+                    "params": text_encoder_params,
+                    "lr": self.cfg.text_encoder_lr if self.cfg.text_encoder_lr is not None else self.cfg.lr,
+                    "weight_decay": self.cfg.weight_decay,
+                }
+            )
+        optimizer = torch.optim.AdamW(optimizer_groups)
         scaler = torch.amp.GradScaler("cuda") if self.cfg.amp and self.device.type == "cuda" else None
         if self.cfg.best_metric_mode == "min":
             best = float("inf")

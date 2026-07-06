@@ -394,8 +394,6 @@ class EventReasoner:
             raise ValueError(f"Unsupported event reasoning strategy: {self.strategy}")
 
         valid_len = int(h_valid.shape[0])
-        if valid_len > max(1, int(self.window_size)) * 2 and len(spans) <= 1:
-            return build_window_events(valid_len=valid_len, window_size=int(self.window_size), stride=self.stride)
         if len(spans) == 0 and valid_len > 0:
             return [(0, valid_len - 1)]
         return spans
