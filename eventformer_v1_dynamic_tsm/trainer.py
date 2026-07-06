@@ -374,7 +374,7 @@ class EventFormerTrainer:
             lr=self.cfg.lr,
             weight_decay=self.cfg.weight_decay,
         )
-        scaler = torch.cuda.amp.GradScaler() if self.cfg.amp and self.device.type == "cuda" else None
+        scaler = torch.amp.GradScaler("cuda") if self.cfg.amp and self.device.type == "cuda" else None
         if self.cfg.best_metric_mode == "min":
             best = float("inf")
         else:

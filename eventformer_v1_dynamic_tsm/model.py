@@ -503,9 +503,14 @@ class EventFormerV1DynamicTSM(nn.Module):
         h_norm = F.normalize(frame_embeddings, dim=-1) if self.normalize_embeddings else frame_embeddings
         g_norm = F.normalize(event_embeddings, dim=-1) if self.normalize_embeddings else event_embeddings
 
-        neg_inf = torch.finfo(q_norm.dtype).min
-        frame_scores = torch.einsum("bd,bnd->bn", q_norm, h_norm).masked_fill(~feature_mask.bool(), neg_inf)
-        event_scores = torch.einsum("bd,bmd->bm", q_norm, g_norm).masked_fill(~event_mask.bool(), neg_inf)
+        frame_scores = torch.einsum("bd,bnd->bn", q_norm, h_norm)
+        event_scores = torch.einsum("bd,bmd->bm", q_norm, g_norm)
+
+        # Use a finite mask value that is safe under AMP/float16.
+        mask_fill_value_frame = torch.tensor(-1e4, dtype=frame_scores.dtype, device=frame_scores.device)
+        mask_fill_value_event = torch.tensor(-1e4, dtype=event_scores.dtype, device=event_scores.device)
+        frame_scores = frame_scores.masked_fill(~feature_mask.bool(), mask_fill_value_frame)
+        event_scores = event_scores.masked_fill(~event_mask.bool(), mask_fill_value_event)
 
         frame_video_scores = frame_scores.max(dim=1).values
         event_video_scores = event_scores.max(dim=1).values
