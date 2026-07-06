@@ -564,14 +564,14 @@ class EventFormerV1DynamicTSM(nn.Module):
             valid_mask=feature_mask,
         )
 
-        neg_inf = torch.finfo(frame_scores.dtype).min
-        masked_gt_scores = frame_scores.masked_fill(~gt_mask, neg_inf)
+        mask_fill_value = torch.tensor(-1e4, dtype=frame_scores.dtype, device=frame_scores.device)
+        masked_gt_scores = frame_scores.masked_fill(~gt_mask, mask_fill_value)
         pos_frame_idx = masked_gt_scores.argmax(dim=1)
         batch_idx = torch.arange(query_embedding.shape[0], device=query_embedding.device)
         pos_frames = frame_embeddings[batch_idx, pos_frame_idx]
 
         outside_mask = valid_mask & ~gt_mask
-        masked_outside_scores = frame_scores.masked_fill(~outside_mask, neg_inf)
+        masked_outside_scores = frame_scores.masked_fill(~outside_mask, mask_fill_value)
         weak_frame_idx = masked_outside_scores.argmax(dim=1)
         weak_frames = frame_embeddings[batch_idx, weak_frame_idx]
         weak_valid_mask = outside_mask.any(dim=1)
@@ -648,8 +648,7 @@ class EventFormerV1DynamicTSM(nn.Module):
         q = F.normalize(query_embedding, dim=-1)
         candidates = F.normalize(candidate_embeddings, dim=-1)
         batch_size = q.shape[0]
-        neg_inf = torch.finfo(q.dtype).min
-        hardest_scores = q.new_full((batch_size, batch_size), neg_inf)
+        hardest_scores = q.new_full((batch_size, batch_size), -1e4)
 
         for video_idx in range(batch_size):
             valid_local = candidate_mask[video_idx].bool()
@@ -666,9 +665,9 @@ class EventFormerV1DynamicTSM(nn.Module):
         valid_mask: Optional[torch.Tensor] = None,
     ):
         batch_size = pos_scores.shape[0]
-        neg_inf = torch.finfo(pos_scores.dtype).min
         self_mask = torch.eye(batch_size, dtype=torch.bool, device=pos_scores.device)
-        neg_scores = neg_scores_by_video.masked_fill(self_mask, neg_inf)
+        mask_fill_value = torch.tensor(-1e4, dtype=pos_scores.dtype, device=pos_scores.device)
+        neg_scores = neg_scores_by_video.masked_fill(self_mask, mask_fill_value)
         logits = torch.cat([pos_scores.unsqueeze(1), neg_scores], dim=1) / self.temperature
         targets = torch.zeros(batch_size, dtype=torch.long, device=logits.device)
         if valid_mask is not None:
@@ -772,7 +771,9 @@ class EventFormerV1DynamicTSM(nn.Module):
             "bd,bmd->bm",
             F.normalize(query_embedding, dim=-1),
             F.normalize(event_embeddings, dim=-1),
-        ).masked_fill(~event_mask.bool(), torch.finfo(event_embeddings.dtype).min)
+        )
+        mask_fill_value = torch.tensor(-1e4, dtype=event_scores.dtype, device=event_scores.device)
+        event_scores = event_scores.masked_fill(~event_mask.bool(), mask_fill_value)
         pos_event_scores = event_scores[batch_idx, mined_events["pos_event_idx"]]
         hard_neg_event_scores = self._mine_hard_negative_scores_per_video(
             query_embedding=query_embedding,
