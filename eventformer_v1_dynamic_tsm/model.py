@@ -72,6 +72,23 @@ def find_best_iou_event(event_spans: List[Tuple[int, int]], gt_start: int, gt_en
     return best_idx, best_iou
 
 
+def _spans_to_tensor(
+    event_spans_batch: List[List[Tuple[int, int]]],
+    max_events: int,
+    device: torch.device,
+):
+    batch_size = len(event_spans_batch)
+    span_tensor = torch.zeros(batch_size, max_events, 2, dtype=torch.long, device=device)
+    span_mask = torch.zeros(batch_size, max_events, dtype=torch.bool, device=device)
+    for b, spans in enumerate(event_spans_batch):
+        clipped = spans[:max_events]
+        if not clipped:
+            continue
+        span_tensor[b, : len(clipped)] = torch.tensor(clipped, dtype=torch.long, device=device)
+        span_mask[b, : len(clipped)] = True
+    return span_tensor, span_mask
+
+
 class AnchorMultiHeadSelfAttention(nn.Module):
     """Multi-head self-attention with per-head temporal anchor windows.
 
@@ -435,6 +452,142 @@ class EventFormerV1DynamicTSM(nn.Module):
         event_embeddings = self.event_encoder(event_x, event_mask)
         return frame_embeddings, event_embeddings, event_mask, event_spans_batch
 
+    def _build_gt_mask(
+        self,
+        seq_len: int,
+        gt_start_idx: torch.Tensor,
+        gt_end_idx: torch.Tensor,
+        valid_mask: Optional[torch.Tensor],
+    ):
+        device = gt_start_idx.device
+        if valid_mask is None:
+            valid_mask = torch.ones(gt_start_idx.shape[0], seq_len, dtype=torch.bool, device=device)
+        else:
+            valid_mask = valid_mask.bool()
+
+        valid_len = valid_mask.sum(dim=1).clamp(min=1)
+        max_idx = valid_len - 1
+        gt_start = torch.minimum(gt_start_idx.long().clamp(min=0), max_idx)
+        gt_end = torch.minimum(gt_end_idx.long().clamp(min=0), max_idx)
+        gt_end = torch.maximum(gt_end, gt_start)
+
+        positions = torch.arange(seq_len, device=device).unsqueeze(0)
+        gt_mask = (positions >= gt_start.unsqueeze(1)) & (positions <= gt_end.unsqueeze(1)) & valid_mask
+        return gt_mask, gt_start, gt_end, valid_mask
+
+    def _mine_positive_frames(
+        self,
+        query_embedding: torch.Tensor,
+        frame_embeddings: torch.Tensor,
+        gt_start_idx: torch.Tensor,
+        gt_end_idx: torch.Tensor,
+        feature_mask: Optional[torch.Tensor],
+    ):
+        q = F.normalize(query_embedding, dim=-1)
+        frames = F.normalize(frame_embeddings, dim=-1)
+        frame_scores = torch.einsum("bd,bnd->bn", q, frames)
+        gt_mask, gt_start, gt_end, valid_mask = self._build_gt_mask(
+            seq_len=frame_embeddings.shape[1],
+            gt_start_idx=gt_start_idx,
+            gt_end_idx=gt_end_idx,
+            valid_mask=feature_mask,
+        )
+
+        neg_inf = torch.finfo(frame_scores.dtype).min
+        masked_gt_scores = frame_scores.masked_fill(~gt_mask, neg_inf)
+        pos_frame_idx = masked_gt_scores.argmax(dim=1)
+        batch_idx = torch.arange(query_embedding.shape[0], device=query_embedding.device)
+        pos_frames = frame_embeddings[batch_idx, pos_frame_idx]
+
+        outside_mask = valid_mask & ~gt_mask
+        masked_outside_scores = frame_scores.masked_fill(~outside_mask, neg_inf)
+        weak_frame_idx = masked_outside_scores.argmax(dim=1)
+        weak_frames = frame_embeddings[batch_idx, weak_frame_idx]
+        weak_valid_mask = outside_mask.any(dim=1)
+
+        return {
+            "q_norm": q,
+            "frames_norm": frames,
+            "frame_scores": frame_scores,
+            "gt_mask": gt_mask,
+            "valid_mask": valid_mask,
+            "gt_start": gt_start,
+            "gt_end": gt_end,
+            "pos_frame_idx": pos_frame_idx,
+            "pos_frames": pos_frames,
+            "weak_frame_idx": weak_frame_idx,
+            "weak_frames": weak_frames,
+            "weak_valid_mask": weak_valid_mask,
+        }
+
+    def _mine_positive_events(
+        self,
+        query_embedding: torch.Tensor,
+        event_embeddings: torch.Tensor,
+        event_spans_batch: List[List[Tuple[int, int]]],
+        event_mask: torch.Tensor,
+        pos_frame_idx: torch.Tensor,
+        gt_start_idx: torch.Tensor,
+        gt_end_idx: torch.Tensor,
+    ):
+        batch_size, max_events, _ = event_embeddings.shape
+        span_tensor, span_valid_mask = _spans_to_tensor(
+            event_spans_batch=event_spans_batch,
+            max_events=max_events,
+            device=event_embeddings.device,
+        )
+        valid_event_mask = event_mask.bool() & span_valid_mask
+        batch_idx = torch.arange(batch_size, device=event_embeddings.device)
+
+        starts = span_tensor[:, :, 0]
+        ends = span_tensor[:, :, 1]
+        frame_idx = pos_frame_idx.unsqueeze(1)
+        contains_mask = valid_event_mask & (starts <= frame_idx) & (frame_idx <= ends)
+        contains_any = contains_mask.any(dim=1)
+        contains_idx = contains_mask.to(torch.int64).argmax(dim=1)
+
+        gt_start = gt_start_idx.long().unsqueeze(1)
+        gt_end = gt_end_idx.long().unsqueeze(1)
+        inter = (torch.minimum(ends, gt_end) - torch.maximum(starts, gt_start) + 1).clamp(min=0)
+        span_len = (ends - starts + 1).clamp(min=0)
+        gt_len = (gt_end - gt_start + 1).clamp(min=1)
+        union = span_len + gt_len - inter
+        iou = inter.to(event_embeddings.dtype) / union.clamp(min=1).to(event_embeddings.dtype)
+        iou = iou.masked_fill(~valid_event_mask, -1.0)
+        best_iou_idx = iou.argmax(dim=1)
+
+        pos_event_idx = torch.where(contains_any, contains_idx, best_iou_idx)
+        valid_positive = valid_event_mask.any(dim=1)
+        pos_events = event_embeddings[batch_idx, pos_event_idx]
+
+        return {
+            "pos_event_idx": pos_event_idx,
+            "pos_events": pos_events,
+            "valid_positive": valid_positive,
+            "span_tensor": span_tensor,
+            "span_mask": valid_event_mask,
+        }
+
+    def _inbatch_contrastive_loss(
+        self,
+        query_embedding: torch.Tensor,
+        positive_embeddings: torch.Tensor,
+        valid_mask: Optional[torch.Tensor] = None,
+    ):
+        q = F.normalize(query_embedding, dim=-1)
+        positives = F.normalize(positive_embeddings, dim=-1)
+        logits = (q @ positives.t()) / self.temperature
+        targets = torch.arange(logits.shape[0], device=logits.device)
+        if valid_mask is not None:
+            valid_mask = valid_mask.bool()
+            if not valid_mask.any():
+                zero = query_embedding.sum() * 0.0
+                return zero, logits
+            loss = F.cross_entropy(logits[valid_mask], targets[valid_mask])
+            return loss, logits
+        loss = F.cross_entropy(logits, targets)
+        return loss, logits
+
     def compute_frame_contrastive_loss(
         self,
         query_embedding: torch.Tensor,
@@ -443,60 +596,28 @@ class EventFormerV1DynamicTSM(nn.Module):
         gt_end_idx: torch.Tensor,
         feature_mask: Optional[torch.Tensor] = None,
     ):
-        q = F.normalize(query_embedding, dim=-1)
-        frames = F.normalize(frame_embeddings, dim=-1)
-        B, N, _ = frames.shape
-        losses = []
+        mined = self._mine_positive_frames(
+            query_embedding=query_embedding,
+            frame_embeddings=frame_embeddings,
+            gt_start_idx=gt_start_idx,
+            gt_end_idx=gt_end_idx,
+            feature_mask=feature_mask,
+        )
+        valid_positive = mined["gt_mask"].any(dim=1)
+        loss_frame, _ = self._inbatch_contrastive_loss(
+            query_embedding=query_embedding,
+            positive_embeddings=mined["pos_frames"],
+            valid_mask=valid_positive,
+        )
 
-        for i in range(B):
-            valid_len = int(feature_mask[i].sum().item()) if feature_mask is not None else N
-            if valid_len <= 0:
-                continue
-            s = int(gt_start_idx[i].item())
-            e = int(gt_end_idx[i].item())
-            s = max(0, min(s, valid_len - 1))
-            e = max(s, min(e, valid_len - 1))
-
-            scores_self = frames[i, :valid_len] @ q[i]
-            pos_score = scores_self[s : e + 1].max()
-
-            neg_scores = []
-            for j in range(B):
-                if j == i:
-                    continue
-                valid_j = int(feature_mask[j].sum().item()) if feature_mask is not None else N
-                if valid_j <= 0:
-                    continue
-                neg_scores.append((frames[j, :valid_j] @ q[i]).max())
-
-            if len(neg_scores) == 0:
-                outside_mask = torch.ones(valid_len, dtype=torch.bool, device=frames.device)
-                outside_mask[s : e + 1] = False
-                if outside_mask.any():
-                    outside_scores = scores_self[outside_mask]
-                    k = min(16, int(outside_scores.numel()))
-                    neg_scores = list(torch.topk(outside_scores, k=k).values)
-                else:
-                    continue
-
-            neg_scores_tensor = torch.stack(neg_scores)
-            logits = torch.cat([pos_score.view(1), neg_scores_tensor], dim=0) / self.temperature
-            target = torch.zeros(1, dtype=torch.long, device=logits.device)
-            loss = F.cross_entropy(logits.unsqueeze(0), target)
-
-            if self.weak_positive_weight > 0:
-                outside_mask = torch.ones(valid_len, dtype=torch.bool, device=frames.device)
-                outside_mask[s : e + 1] = False
-                if outside_mask.any():
-                    weak_pos_score = scores_self[outside_mask].max()
-                    logits_w = torch.cat([weak_pos_score.view(1), neg_scores_tensor.detach()], dim=0) / self.temperature
-                    loss = loss + (self.weak_positive_weight * F.cross_entropy(logits_w.unsqueeze(0), target))
-
-            losses.append(loss)
-
-        if len(losses) == 0:
-            return query_embedding.sum() * 0.0
-        return torch.stack(losses).mean()
+        if self.use_weak_positive and self.weak_positive_weight > 0:
+            loss_weak, _ = self._inbatch_contrastive_loss(
+                query_embedding=query_embedding,
+                positive_embeddings=mined["weak_frames"],
+                valid_mask=mined["weak_valid_mask"],
+            )
+            loss_frame = loss_frame + (self.weak_positive_weight * loss_weak)
+        return loss_frame
 
     def compute_event_contrastive_loss(
         self,
@@ -507,70 +628,30 @@ class EventFormerV1DynamicTSM(nn.Module):
         frame_embeddings: torch.Tensor,
         gt_start_idx: torch.Tensor,
         gt_end_idx: torch.Tensor,
+        feature_mask: Optional[torch.Tensor] = None,
     ):
-        q = F.normalize(query_embedding, dim=-1)
-        events = F.normalize(event_embeddings, dim=-1)
-        frames = F.normalize(frame_embeddings, dim=-1)
-        B, M, _ = events.shape
-        losses = []
-
-        for i in range(B):
-            spans_i = event_spans_batch[i]
-            if len(spans_i) == 0:
-                continue
-
-            valid_len = frame_embeddings.shape[1]
-            s = int(gt_start_idx[i].item())
-            e = int(gt_end_idx[i].item())
-            s = max(0, min(s, valid_len - 1))
-            e = max(s, min(e, valid_len - 1))
-
-            frame_scores_gt = frames[i, s : e + 1] @ q[i]
-            pos_frame_idx = s + int(torch.argmax(frame_scores_gt).item())
-
-            pos_event_idx = find_event_containing_frame(spans_i, pos_frame_idx)
-            if pos_event_idx is None or pos_event_idx >= M or not bool(event_mask[i, pos_event_idx].item()):
-                pos_event_idx, _ = find_best_iou_event(spans_i, s, e)
-            if pos_event_idx is None or pos_event_idx >= M or not bool(event_mask[i, pos_event_idx].item()):
-                continue
-
-            pos_score = events[i, pos_event_idx] @ q[i]
-            neg_scores = []
-
-            for j in range(B):
-                if j == i:
-                    continue
-                valid_j = event_mask[j].bool()
-                if valid_j.any():
-                    neg_scores.append((events[j, valid_j] @ q[i]).max())
-
-            if len(neg_scores) == 0:
-                valid_i = event_mask[i].bool()
-                event_scores_i = events[i, valid_i] @ q[i]
-                valid_indices = torch.where(valid_i)[0].tolist()
-                local_neg_scores = []
-                gt_span = (s, e)
-                for local_idx, global_event_idx in enumerate(valid_indices):
-                    if global_event_idx == pos_event_idx:
-                        continue
-                    if global_event_idx < len(spans_i):
-                        overlap = max(0, min(spans_i[global_event_idx][1], gt_span[1]) - max(spans_i[global_event_idx][0], gt_span[0]) + 1)
-                        if overlap <= 0:
-                            local_neg_scores.append(event_scores_i[local_idx])
-                if len(local_neg_scores) == 0:
-                    continue
-                local_neg_scores_tensor = torch.stack(local_neg_scores)
-                k = min(16, int(local_neg_scores_tensor.numel()))
-                neg_scores = list(torch.topk(local_neg_scores_tensor, k=k).values)
-
-            neg_scores_tensor = torch.stack(neg_scores)
-            logits = torch.cat([pos_score.view(1), neg_scores_tensor], dim=0) / self.temperature
-            target = torch.zeros(1, dtype=torch.long, device=logits.device)
-            losses.append(F.cross_entropy(logits.unsqueeze(0), target))
-
-        if len(losses) == 0:
-            return query_embedding.sum() * 0.0
-        return torch.stack(losses).mean()
+        mined_frames = self._mine_positive_frames(
+            query_embedding=query_embedding,
+            frame_embeddings=frame_embeddings,
+            gt_start_idx=gt_start_idx,
+            gt_end_idx=gt_end_idx,
+            feature_mask=feature_mask,
+        )
+        mined_events = self._mine_positive_events(
+            query_embedding=query_embedding,
+            event_embeddings=event_embeddings,
+            event_spans_batch=event_spans_batch,
+            event_mask=event_mask,
+            pos_frame_idx=mined_frames["pos_frame_idx"],
+            gt_start_idx=mined_frames["gt_start"],
+            gt_end_idx=mined_frames["gt_end"],
+        )
+        loss_event, _ = self._inbatch_contrastive_loss(
+            query_embedding=query_embedding,
+            positive_embeddings=mined_events["pos_events"],
+            valid_mask=mined_events["valid_positive"],
+        )
+        return loss_event
 
     def forward(
         self,
@@ -624,6 +705,7 @@ class EventFormerV1DynamicTSM(nn.Module):
                 frame_embeddings=h,
                 gt_start_idx=gt_start_idx,
                 gt_end_idx=gt_end_idx,
+                feature_mask=feature_mask,
             )
             out.update(
                 {
