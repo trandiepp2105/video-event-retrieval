@@ -97,6 +97,9 @@ class TrainConfig:
     epochs: int = 3
     lr: float = 1e-4
     weight_decay: float = 1e-4
+    lr_scheduler: str = "cosine"
+    warmup_ratio: float = 0.1
+    min_lr_ratio: float = 0.1
     max_grad_norm: float = 1.0
     amp: bool = True
     device: str = "cuda" if (torch is not None and torch.cuda.is_available()) else "cpu"

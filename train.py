@@ -50,6 +50,9 @@ def parse_args():
     parser.add_argument("--max-localizer-span-len", type=int, default=None)
     parser.add_argument("--shared-norm-num-negatives", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument("--lr-scheduler", type=str, default=None)
+    parser.add_argument("--warmup-ratio", type=float, default=None)
+    parser.add_argument("--min-lr-ratio", type=float, default=None)
     parser.add_argument("--weight-decay", type=float, default=None)
     parser.add_argument("--max-grad-norm", type=float, default=None)
     parser.add_argument("--temperature", type=float, default=None)
@@ -121,6 +124,9 @@ def build_config(args) -> TrainConfig:
         "max_localizer_span_len",
         "shared_norm_num_negatives",
         "lr",
+        "lr_scheduler",
+        "warmup_ratio",
+        "min_lr_ratio",
         "weight_decay",
         "max_grad_norm",
         "temperature",

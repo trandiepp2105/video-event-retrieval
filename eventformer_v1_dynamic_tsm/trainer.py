@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from dataclasses import asdict
+import math
 from pathlib import Path
 from typing import Optional
 
@@ -118,10 +119,33 @@ class EventFormerTrainer:
             moved[k] = moved[k].to(self.device, non_blocking=True)
         return moved
 
-    def train_one_epoch(self, loader, optimizer, scaler, epoch: int):
+    def _build_scheduler(self, optimizer, steps_per_epoch: int):
+        if self.cfg.lr_scheduler in (None, "none"):
+            return None
+        total_steps = max(1, steps_per_epoch * self.cfg.epochs)
+        warmup_steps = min(total_steps - 1, max(0, int(total_steps * self.cfg.warmup_ratio)))
+        min_lr_ratio = float(self.cfg.min_lr_ratio)
+
+        def lr_lambda(current_step: int):
+            if warmup_steps > 0 and current_step < warmup_steps:
+                return float(current_step + 1) / float(max(1, warmup_steps))
+            if self.cfg.lr_scheduler == "linear":
+                progress = (current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+                return max(min_lr_ratio, 1.0 - progress * (1.0 - min_lr_ratio))
+            if self.cfg.lr_scheduler == "cosine":
+                progress = (current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+                cosine = 0.5 * (1.0 + math.cos(math.pi * min(1.0, max(0.0, progress))))
+                return min_lr_ratio + (1.0 - min_lr_ratio) * cosine
+            raise ValueError(f"Unsupported lr_scheduler: {self.cfg.lr_scheduler}")
+
+        return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+
+    def train_one_epoch(self, loader, optimizer, scaler, scheduler, epoch: int):
         assert self.model is not None
         self.model.train()
         total = 0.0
+        total_events = 0.0
+        total_batches_with_events = 0
         pbar = tqdm(loader, desc=f"train epoch {epoch}")
         for batch in pbar:
             batch = self._move_batch(batch)
@@ -155,6 +179,8 @@ class EventFormerTrainer:
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.max_grad_norm)
                 optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
             total += float(loss.item())
             postfix = {"loss": f"{float(loss.item()):.4f}"}
             if loss_frame is not None:
@@ -163,9 +189,17 @@ class EventFormerTrainer:
                 postfix["l_event"] = f"{float(loss_event.item()):.4f}"
             if event_spans:
                 num_events = [len(spans) for spans in event_spans]
-                postfix["ev_mean"] = f"{(sum(num_events) / max(1, len(num_events))):.1f}"
+                batch_ev_mean = sum(num_events) / max(1, len(num_events))
+                total_events += batch_ev_mean
+                total_batches_with_events += 1
+                postfix["ev_mean"] = f"{batch_ev_mean:.1f}"
+            postfix["lr"] = f"{optimizer.param_groups[0]['lr']:.2e}"
             pbar.set_postfix(postfix)
-        return total / max(1, len(loader))
+        return {
+            "loss": total / max(1, len(loader)),
+            "train_event_mean": total_events / max(1, total_batches_with_events),
+            "lr": optimizer.param_groups[0]["lr"],
+        }
 
     @torch.inference_mode()
     def evaluate_loss(self, loader):
@@ -472,6 +506,7 @@ class EventFormerTrainer:
                 }
             )
         optimizer = torch.optim.AdamW(optimizer_groups)
+        scheduler = self._build_scheduler(optimizer, steps_per_epoch=len(train_loader))
         scaler = torch.amp.GradScaler("cuda") if self.cfg.amp and self.device.type == "cuda" else None
         if self.cfg.best_metric_mode == "min":
             best = float("inf")
@@ -479,10 +514,18 @@ class EventFormerTrainer:
             best = float("-inf")
         log_rows = []
         for epoch in range(1, self.cfg.epochs + 1):
-            train_loss = self.train_one_epoch(train_loader, optimizer, scaler, epoch)
+            train_stats = self.train_one_epoch(train_loader, optimizer, scaler, scheduler, epoch)
+            train_loss = train_stats["loss"]
             val_loss = self.evaluate_loss(val_loader)
             val_metrics = self.evaluate_retrieval(val_loader)
-            log_row = {"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss, **val_metrics}
+            log_row = {
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "train_event_mean": train_stats["train_event_mean"],
+                "lr": train_stats["lr"],
+                "val_loss": val_loss,
+                **val_metrics,
+            }
             log_rows.append(log_row)
             print(log_row)
             if not self.cfg.save_best_only:
